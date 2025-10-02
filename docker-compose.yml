@@ -1,0 +1,43 @@
+services:
+  kali:
+    image: kalilinux/kali-rolling:latest
+    container_name: kali-llm-web-kali-1
+    command: tail -f /dev/null
+    volumes:
+      - ./shared:/shared
+      - ./shared/work:/app/work
+    networks:
+      - kali-net
+    restart: unless-stopped
+
+  driver:
+    build: .
+    container_name: kali-llm-web-driver-1
+    depends_on:
+      - kali
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./shared:/shared
+      - ./shared/logs:/app/logs
+      - ./shared/work:/app/work
+    networks:
+      - kali-net
+    environment:
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.moonshot.ai/v1}
+      - LLM_MODEL=${LLM_MODEL:-kimi-k2-0905-preview}
+      - AUTO_CONTINUE_DELAY=${AUTO_CONTINUE_DELAY:-10}
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  kali-net:
+    driver: bridge

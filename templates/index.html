@@ -5,12 +5,6 @@
 <style>
 *{box-sizing:border-box}
 :root{
-  --bg:#fff;--fg:#000;--card-bg:#fff;--card-border:#ddd;
-  --input-bg:#fff;--input-border:#ccc;--status-bg:#f5f5f5;
-  --tab-inactive:#666;--tab-active:#2196f3;--task-bg:#fff;
-  --hover-bg:#f9f9f9;--grid-border:#e0e0e0;--badge-bg:#f5f5f5;
-}
-body.dark{
   --bg:#1a1a1a;--fg:#e0e0e0;--card-bg:#2d2d2d;--card-border:#444;
   --input-bg:#1a1a1a;--input-border:#555;--status-bg:#2d2d2d;
   --tab-inactive:#aaa;--tab-active:#64b5f6;--task-bg:#2d2d2d;
@@ -23,6 +17,7 @@ body{font-family:Arial,sans-serif;margin:0;padding:1rem;height:100vh;overflow:hi
 .card{background:var(--card-bg);border:1px solid var(--card-border);border-radius:8px;padding:15px}
 .card h3{margin:0 0 10px 0;font-size:16px;color:var(--fg)}
 textarea{width:100%;padding:8px;border:1px solid var(--input-border);border-radius:4px;font-family:inherit;resize:vertical;background:var(--input-bg);color:var(--fg)}
+textarea:focus{outline:none;border-color:#64b5f6}
 button{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;font-weight:500}
 button:disabled{opacity:0.5;cursor:not-allowed}
 .btn-primary{background:#2196f3;color:#fff}
@@ -50,14 +45,13 @@ button:hover:not(:disabled){opacity:0.9}
 .controls button{padding:4px 10px;font-size:12px}
 .file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
 .file-card{padding:20px;border:2px solid var(--grid-border);border-radius:8px;text-align:center;cursor:pointer;transition:all 0.2s;background:var(--card-bg)}
-.file-card:hover{border-color:#2196f3;transform:translateY(-2px);box-shadow:0 4px 8px rgba(0,0,0,0.1)}
-.file-card.dir{background:#e3f2fd}
-.file-card.file{background:#fff3e0}
-body.dark .file-card.dir{background:#1e3a5f}
-body.dark .file-card.file{background:#3d2f1f}
+.file-card:hover{border-color:#2196f3;transform:translateY(-2px);box-shadow:0 4px 8px rgba(0,0,0,0.3)}
+.file-card.dir{background:#1e3a5f}
+.file-card.file{background:#3d2f1f}
 .icon{font-size:36px;margin-bottom:8px}
 .terminal{background:#000;color:#0f0;font-family:'Courier New',monospace;padding:15px;border-radius:6px;white-space:pre-wrap;overflow:auto;flex:1}
 input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--fg)}
+input[type=text]:focus{outline:none;border-color:#64b5f6}
 .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
 .field{margin-bottom:12px}
 .field label{display:block;font-weight:600;margin-bottom:4px;color:var(--fg)}
@@ -65,20 +59,19 @@ input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:
 .field.description textarea{min-height:80px}
 .viewer{background:var(--status-bg);padding:15px;border-radius:6px;margin-top:10px}
 .viewer pre{background:var(--card-bg);padding:15px;border-radius:4px;overflow-x:auto;margin:10px 0;border:1px solid var(--card-border);color:var(--fg)}
-.theme-toggle{position:fixed;top:20px;right:20px;z-index:1000;background:var(--card-bg);border:1px solid var(--card-border);border-radius:50%;width:50px;height:50px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:24px;box-shadow:0 2px 8px rgba(0,0,0,0.2)}
-.theme-toggle:hover{transform:scale(1.1)}
+.quick-nav{display:flex;gap:10px;margin-bottom:10px}
+.quick-nav button{padding:6px 12px;font-size:13px}
 </style>
 </head>
 <body>
-<div class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark Mode">🌓</div>
 <div class="container">
   <div class="left">
     <div class="card">
       <h3>📝 Task Input</h3>
       <textarea id="input" rows="6" placeholder="Example: Perform recon on domain example.com&#10;&#10;Press Enter or click Start to begin"></textarea>
       <div class="btn-group" style="margin-top:10px">
-        <button class="btn-success" id="startBtn" onclick="handleStart()">▶️ Start</button>
-        <button class="btn-danger" onclick="handleReset()">🔄 Reset</button>
+        <button class="btn-success" id="startBtn">▶️ Start</button>
+        <button class="btn-danger" id="resetBtn">🔄 Reset</button>
       </div>
     </div>
     
@@ -86,19 +79,15 @@ input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:
       <h3>✏️ Task Configuration</h3>
       <div class="field">
         <label>Abstract</label>
-        <textarea id="abstract" readonly style="background:#f0f0f0"></textarea>
+        <textarea id="abstract"></textarea>
       </div>
       <div class="field description">
         <label>Description</label>
-        <textarea id="description" readonly style="background:#f0f0f0"></textarea>
+        <textarea id="description"></textarea>
       </div>
       <div class="field">
         <label>Verification</label>
-        <textarea id="verification" readonly style="background:#f0f0f0"></textarea>
-      </div>
-      <div class="btn-group" id="editBtns" style="display:none">
-        <button class="btn-success" onclick="handleSave()">💾 Save</button>
-        <button class="btn-warning" onclick="handleCancel()">✖ Cancel</button>
+        <textarea id="verification"></textarea>
       </div>
     </div>
     
@@ -107,16 +96,16 @@ input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:
   
   <div class="right card">
     <div class="tabs">
-      <div class="tab active" onclick="switchTab(event,'tasks')">📋 Tasks</div>
-      <div class="tab" onclick="switchTab(event,'graph')">🌳 Graph</div>
-      <div class="tab" onclick="switchTab(event,'terminal')">💻 Terminal</div>
-      <div class="tab" onclick="switchTab(event,'llm')">🤖 LLM</div>
-      <div class="tab" onclick="switchTab(event,'files')">📁 Files</div>
+      <div class="tab active" data-tab="tasks">📋 Tasks</div>
+      <div class="tab" data-tab="graph">🌳 Graph</div>
+      <div class="tab" data-tab="terminal">💻 Terminal</div>
+      <div class="tab" data-tab="llm">🤖 LLM</div>
+      <div class="tab" data-tab="files">📁 Files</div>
     </div>
     
     <div id="tasks" class="tab-content active">
       <div class="toolbar">
-        <button class="btn-primary" onclick="loadTasks()">🔄 Refresh</button>
+        <button class="btn-primary" id="refreshTasksBtn">🔄 Refresh</button>
         <span id="count"></span>
       </div>
       <div id="taskList"></div>
@@ -125,17 +114,17 @@ input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:
     <div id="graph" class="tab-content">
       <div class="toolbar">
         <input type="text" id="graphId" placeholder="Task ID">
-        <button class="btn-primary" onclick="loadGraph()">Load</button>
-        <button id="graphAuto" class="btn-primary" onclick="toggleAuto('graph')">Auto: OFF</button>
+        <button class="btn-primary" id="loadGraphBtn">Load</button>
+        <button id="graphAuto" class="btn-primary">Auto: OFF</button>
       </div>
-      <div id="graphView" style="flex:1;overflow:auto;background:#fafafa;padding:10px"></div>
+      <div id="graphView" style="flex:1;overflow:auto;background:#1a1a1a;padding:10px"></div>
     </div>
     
     <div id="terminal" class="tab-content">
       <div class="toolbar">
         <input type="text" id="termId" placeholder="Task ID">
-        <button class="btn-primary" onclick="loadTerm()">Load</button>
-        <button id="termAuto" class="btn-primary" onclick="toggleAuto('term')">Auto: OFF</button>
+        <button class="btn-primary" id="loadTermBtn">Load</button>
+        <button id="termAuto" class="btn-primary">Auto: OFF</button>
       </div>
       <div id="termView" class="terminal"></div>
     </div>
@@ -143,16 +132,21 @@ input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:
     <div id="llm" class="tab-content">
       <div class="toolbar">
         <input type="text" id="llmId" placeholder="Task ID">
-        <button class="btn-primary" onclick="loadLLM()">Load</button>
-        <button id="llmAuto" class="btn-primary" onclick="toggleAuto('llm')">Auto: OFF</button>
+        <button class="btn-primary" id="loadLLMBtn">Load</button>
+        <button id="llmAuto" class="btn-primary">Auto: OFF</button>
       </div>
       <div id="llmView" class="terminal" style="color:#ff0;background:#1a1a1a"></div>
     </div>
     
     <div id="files" class="tab-content">
+      <div class="quick-nav">
+        <button class="btn-primary" id="navWork">📂 Work</button>
+        <button class="btn-primary" id="navLogs">📋 Logs</button>
+        <button class="btn-primary" id="navShared">🔗 Shared</button>
+      </div>
       <div class="toolbar">
         <strong>📂 <span id="path">/app/work</span></strong>
-        <button id="upBtn" class="btn-primary" onclick="goUp()" style="display:none">⬆ Up</button>
+        <button id="upBtn" class="btn-primary" style="display:none">⬆ Up</button>
       </div>
       <div id="fileGrid" class="file-grid"></div>
       <div id="fileView" class="viewer" style="display:none"></div>
@@ -162,28 +156,107 @@ input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:
 
 <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
 <script>
-mermaid.initialize({startOnLoad:false,theme:'default'});
+mermaid.initialize({startOnLoad:false,theme:'dark'});
 
 // Global state
-let task=null,orig=null,editing=false,curPath='/app/work',curTask=null;
+let task=null,orig=null,curPath='/app/work',curTask=null;
 let intervals={graph:null,term:null,llm:null,poll:null};
 let auto={graph:false,term:false,llm:false};
 
+// DOM element references
+let input, status, startBtn, resetBtn, taskCard, abstract, description, verification;
+let graphId, termId, llmId, graphView, termView, llmView, fileGrid, fileView, path, upBtn, taskList, count;
+let refreshTasksBtn, loadGraphBtn, loadTermBtn, loadLLMBtn, graphAuto, termAuto, llmAuto;
+let navWork, navLogs, navShared;
+
 function msg(t,c='#2196f3'){
+  if(!status) return;
   status.innerHTML=t;
   status.style.borderLeftColor=c;
 }
 
-// Enter key to start
+// Initialize on DOM load
 document.addEventListener('DOMContentLoaded',()=>{
+  console.log('DOM loaded, initializing...');
+  
+  // Initialize all element references
+  input = document.getElementById('input');
+  status = document.getElementById('status');
+  startBtn = document.getElementById('startBtn');
+  resetBtn = document.getElementById('resetBtn');
+  taskCard = document.getElementById('taskCard');
+  abstract = document.getElementById('abstract');
+  description = document.getElementById('description');
+  verification = document.getElementById('verification');
+  graphId = document.getElementById('graphId');
+  termId = document.getElementById('termId');
+  llmId = document.getElementById('llmId');
+  graphView = document.getElementById('graphView');
+  termView = document.getElementById('termView');
+  llmView = document.getElementById('llmView');
+  fileGrid = document.getElementById('fileGrid');
+  fileView = document.getElementById('fileView');
+  path = document.getElementById('path');
+  upBtn = document.getElementById('upBtn');
+  taskList = document.getElementById('taskList');
+  count = document.getElementById('count');
+  refreshTasksBtn = document.getElementById('refreshTasksBtn');
+  loadGraphBtn = document.getElementById('loadGraphBtn');
+  loadTermBtn = document.getElementById('loadTermBtn');
+  loadLLMBtn = document.getElementById('loadLLMBtn');
+  graphAuto = document.getElementById('graphAuto');
+  termAuto = document.getElementById('termAuto');
+  llmAuto = document.getElementById('llmAuto');
+  navWork = document.getElementById('navWork');
+  navLogs = document.getElementById('navLogs');
+  navShared = document.getElementById('navShared');
+  
+  console.log('Elements initialized');
+  
+  // Add event listeners
   input.addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey){
       e.preventDefault();
+      console.log('Enter key pressed');
       handleStart();
     }
   });
+  
+  startBtn.addEventListener('click', handleStart);
+  resetBtn.addEventListener('click', handleReset);
+  refreshTasksBtn.addEventListener('click', loadTasks);
+  loadGraphBtn.addEventListener('click', loadGraph);
+  loadTermBtn.addEventListener('click', loadTerm);
+  loadLLMBtn.addEventListener('click', loadLLM);
+  graphAuto.addEventListener('click', ()=>toggleAuto('graph'));
+  termAuto.addEventListener('click', ()=>toggleAuto('term'));
+  llmAuto.addEventListener('click', ()=>toggleAuto('llm'));
+  upBtn.addEventListener('click', goUp);
+  navWork.addEventListener('click', ()=>loadFiles('/app/work'));
+  navLogs.addEventListener('click', ()=>loadFiles('/app/logs'));
+  navShared.addEventListener('click', ()=>loadFiles('/shared'));
+  
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(tab=>{
+    tab.addEventListener('click', function(){
+      const tabName = this.getAttribute('data-tab');
+      switchTab(tabName);
+    });
+  });
+  
+  console.log('Event listeners attached');
+  msg('Ready to start');
   loadTasks();
 });
+
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  document.querySelector(`.tab[data-tab="${name}"]`).classList.add('active');
+  document.getElementById(name).classList.add('active');
+  if(name==='files')loadFiles(curPath);
+  else if(name==='tasks')loadTasks();
+}
 
 // Main start function - handles both translate and execute
 async function handleStart(){
@@ -224,22 +297,7 @@ async function handleStart(){
       taskCard.style.display='block';
       startBtn.disabled=false;
       startBtn.innerHTML='▶️ Execute Task';
-      msg('✅ Task translated! Click Start again to execute, or click fields to edit','#4caf50');
-      
-      // Make fields editable on click
-      [abstract,description,verification].forEach(e=>{
-        e.onclick=()=>{
-          if(!editing){
-            editing=true;
-            [abstract,description,verification].forEach(f=>{
-              f.readonly=false;
-              f.style.background='#fff';
-            });
-            editBtns.style.display='flex';
-            startBtn.disabled=true;
-          }
-        };
-      });
+      msg('✅ Task translated! Edit fields if needed, then click Execute','#4caf50');
       
     }catch(e){
       console.error('Translation error:', e);
@@ -249,9 +307,15 @@ async function handleStart(){
     return;
   }
   
-  // Step 2: Execute the task
-  if(editing){
-    msg('⚠ Save changes first','#ff9800');
+  // Step 2: Execute the task (update task with current field values)
+  task = {
+    abstract: abstract.value.trim(),
+    description: description.value.trim(),
+    verification: verification.value.trim()
+  };
+  
+  if(!task.abstract || !task.description || !task.verification){
+    msg('⚠ All fields are required','#ff9800');
     return;
   }
   
@@ -277,7 +341,7 @@ async function handleStart(){
     curTask=d.task_id;
     graphId.value=termId.value=llmId.value=curTask;
     msg('✅ Task '+curTask+' running','#4caf50');
-    switchTab({target:document.querySelectorAll('.tab')[2]},'terminal');
+    switchTab('terminal');
     startAuto();
     loadTasks();
     
@@ -288,42 +352,9 @@ async function handleStart(){
   }
 }
 
-function handleSave(){
-  task={
-    abstract:abstract.value.trim(),
-    description:description.value.trim(),
-    verification:verification.value.trim()
-  };
-  orig={...task};
-  editing=false;
-  [abstract,description,verification].forEach(e=>{
-    e.readonly=true;
-    e.style.background='#f0f0f0';
-  });
-  editBtns.style.display='none';
-  startBtn.disabled=false;
-  msg('💾 Changes saved!','#4caf50');
-}
-
-function handleCancel(){
-  abstract.value=orig.abstract;
-  description.value=orig.description;
-  verification.value=orig.verification;
-  task={...orig};
-  editing=false;
-  [abstract,description,verification].forEach(e=>{
-    e.readonly=true;
-    e.style.background='#f0f0f0';
-  });
-  editBtns.style.display='none';
-  startBtn.disabled=false;
-  msg('❌ Changes cancelled');
-}
-
 function handleReset(){
   Object.values(intervals).forEach(i=>i&&clearInterval(i));
   task=orig=null;
-  editing=false;
   curTask=null;
   input.value='';
   abstract.value='';
@@ -334,15 +365,6 @@ function handleReset(){
   startBtn.innerHTML='▶️ Start';
   msg('🔄 Reset');
   fetch('/reset',{method:'POST'});
-}
-
-function switchTab(e,name){
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-  e.target.classList.add('active');
-  document.getElementById(name).classList.add('active');
-  if(name==='files')loadFiles(curPath);
-  else if(name==='tasks')loadTasks();
 }
 
 async function loadTasks(){
@@ -374,8 +396,7 @@ async function loadTasks(){
 async function viewTask(id){
   graphId.value=termId.value=llmId.value=id;
   await loadGraph();
-  const tabs=document.querySelectorAll('.tab');
-  switchTab({target:tabs[1]},'graph');
+  switchTab('graph');
 }
 
 async function viewNode(id,e){
@@ -416,7 +437,28 @@ async function loadGraph(){
     const r=await fetch('/tree?task_id='+id);
     const d=await r.json();
     if(d.error)return graphView.innerHTML='<div style="color:#f44336;padding:20px">'+d.error+'</div>';
-    graphView.innerHTML='<div class="mermaid">'+d.graph+'</div>';
+    
+    // Inject custom Mermaid theme configuration
+    let graph = d.graph;
+    if(!graph.includes('%%{init:')){
+      graph = `%%{init: {'theme':'dark', 'themeVariables': {
+        'primaryColor': '#2d2d2d',
+        'primaryTextColor': '#e0e0e0',
+        'primaryBorderColor': '#64b5f6',
+        'lineColor': '#64b5f6',
+        'secondaryColor': '#1e3a5f',
+        'tertiaryColor': '#3d2f1f',
+        'background': '#1a1a1a',
+        'mainBkg': '#2d2d2d',
+        'secondBkg': '#3d3d3d',
+        'mainContrastColor': '#e0e0e0',
+        'darkMode': true,
+        'fontFamily': 'Arial',
+        'fontSize': '14px'
+      }}}%%\n` + graph;
+    }
+    
+    graphView.innerHTML='<div class="mermaid">'+graph+'</div>';
     mermaid.init(undefined,graphView.querySelector('.mermaid'));
   }catch(e){graphView.innerHTML='<div style="color:#f44336">'+e.message+'</div>'}
 }
@@ -445,11 +487,11 @@ async function loadLLM(){
 
 function toggleAuto(type){
   auto[type]=!auto[type];
-  const btn=document.getElementById(type+'Auto');
+  const btn=type==='graph'?graphAuto:type==='term'?termAuto:llmAuto;
   btn.textContent='Auto: '+(auto[type]?'ON':'OFF');
   btn.className=auto[type]?'btn-success':'btn-primary';
   if(auto[type]){
-    const id=document.getElementById(type+'Id').value.trim();
+    const id=(type==='graph'?graphId:type==='term'?termId:llmId).value.trim();
     if(!id)return;
     intervals[type]=setInterval(()=>type==='graph'?loadGraph():type==='term'?loadTerm():loadLLM(),3000);
   }else if(intervals[type]){
@@ -461,7 +503,7 @@ function toggleAuto(type){
 function startAuto(){
   ['graph','term','llm'].forEach(t=>{
     auto[t]=true;
-    const btn=document.getElementById(t+'Auto');
+    const btn=t==='graph'?graphAuto:t==='term'?termAuto:llmAuto;
     btn.textContent='Auto: ON';
     btn.className='btn-success';
     intervals[t]=setInterval(()=>t==='graph'?loadGraph():t==='term'?loadTerm():loadLLM(),3000);
@@ -494,7 +536,7 @@ async function loadFiles(p){
       const c=document.createElement('div');
       c.className='file-card '+(f.type==='directory'?'dir':'file');
       const icon=f.type==='directory'?'📁':f.name.endsWith('.txt')?'📄':f.name.endsWith('.log')?'📋':f.name.endsWith('.json')?'📊':'📄';
-      c.innerHTML='<div class="icon">'+icon+'</div><div style="font-weight:600;font-size:13px;word-break:break-word">'+f.name+'</div><div style="font-size:11px;color:#666;margin-top:5px">'+f.size+'</div>';
+      c.innerHTML='<div class="icon">'+icon+'</div><div style="font-weight:600;font-size:13px;word-break:break-word">'+f.name+'</div><div style="font-size:11px;color:#999;margin-top:5px">'+f.size+'</div>';
       c.onclick=()=>f.type==='directory'?loadFiles(f.full_path):viewFile(f.full_path);
       fileGrid.appendChild(c);
     });
@@ -518,6 +560,7 @@ async function viewFile(p){
 }
 
 function copyFile(){
+  const fc=document.getElementById('fc');
   navigator.clipboard.writeText(fc.textContent).then(()=>msg('📋 Copied!','#4caf50')).catch(()=>msg('❌ Copy failed','#f44336'));
 }
 

@@ -146,18 +146,18 @@ class TaskRelationManager:
             return "\n".join(advice_parts)
     
     def _draw_graph(self) -> None:
-        """Generate Mermaid diagram and write to file"""
+        """Generate Mermaid diagram and write to file with better dark mode colors"""
         lines = ["graph TD"]
         
-        # Add nodes
+        # Add nodes with better readability
         for node_id, node_info in self.nodes.items():
             abstract = node_info['abstract'][:50]  # Truncate for readability
             status = node_info['status']
             
-            # Style based on status
+            # Better emoji and status indicators
             status_icon = {
                 'pending': '⏳',
-                'planning': '🤔',
+                'planning': '🧠',
                 'working': '⚙️',
                 'completed': '✅',
                 'failed': '❌',
@@ -165,34 +165,46 @@ class TaskRelationManager:
                 'impossible': '⛔'
             }.get(status, '◯')
             
+            # Escape special characters for Mermaid
             label = f"{status_icon} {abstract}"
+            label = label.replace('"', "'")  # Replace quotes to avoid breaking Mermaid
             lines.append(f'    {node_id}["{label}"]')
         
-        # Add edges
+        # Add edges with better styling
         for from_id, to_id, edge_type in self.edges:
             if edge_type == 'DOWN':
                 lines.append(f'    {from_id} --> {to_id}')
             elif edge_type == 'RIGHT':
                 lines.append(f'    {from_id} -.-> {to_id}')
         
-        # Add styling
+        # Add enhanced styling for dark mode with better contrast
         lines.extend([
             '',
-            '    classDef completed fill:#90EE90',
-            '    classDef working fill:#FFD700',
-            '    classDef failed fill:#FF6B6B',
-            '    classDef pending fill:#E0E0E0',
+            '    %% Enhanced styling for dark mode',
+            '    classDef completed fill:#2e7d32,stroke:#4caf50,stroke-width:3px,color:#ffffff',
+            '    classDef working fill:#f57c00,stroke:#ff9800,stroke-width:3px,color:#ffffff',
+            '    classDef planning fill:#1976d2,stroke:#2196f3,stroke-width:3px,color:#ffffff',
+            '    classDef failed fill:#c62828,stroke:#f44336,stroke-width:3px,color:#ffffff',
+            '    classDef cancelled fill:#616161,stroke:#9e9e9e,stroke-width:3px,color:#ffffff',
+            '    classDef impossible fill:#6a1b9a,stroke:#9c27b0,stroke-width:3px,color:#ffffff',
+            '    classDef pending fill:#37474f,stroke:#607d8b,stroke-width:2px,color:#e0e0e0',
         ])
         
-        # Apply styles
+        # Apply styles to nodes
         for node_id, node_info in self.nodes.items():
             status = node_info['status']
             if status == 'completed':
                 lines.append(f'    class {node_id} completed')
-            elif status in ['working', 'planning']:
+            elif status == 'working':
                 lines.append(f'    class {node_id} working')
-            elif status in ['failed', 'impossible']:
+            elif status == 'planning':
+                lines.append(f'    class {node_id} planning')
+            elif status == 'failed':
                 lines.append(f'    class {node_id} failed')
+            elif status == 'cancelled':
+                lines.append(f'    class {node_id} cancelled')
+            elif status == 'impossible':
+                lines.append(f'    class {node_id} impossible')
             else:
                 lines.append(f'    class {node_id} pending')
         

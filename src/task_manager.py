@@ -211,6 +211,37 @@ class TaskManager:
                 return True
         return False
     
+    def remove_node(self, node_id: str) -> bool:
+        """Remove a node from the task tree"""
+        # First, find which task this node belongs to
+        task_id = None
+        with self.trms_lock:
+            for tid, trm in self.trms.items():
+                with trm.lock:
+                    if node_id in trm.nodes:
+                        task_id = tid
+                        break
+        
+        if not task_id:
+            return False
+        
+        # Cancel the node first
+        self.cancel_node(node_id)
+        
+        # Remove from TRM
+        with self.trms_lock:
+            if task_id in self.trms:
+                trm = self.trms[task_id]
+                trm.remove_node(node_id)
+        
+        # Remove from nodes dict
+        with self.nodes_lock:
+            if node_id in self.nodes:
+                del self.nodes[node_id]
+                print(f"[NODE {node_id}] Removed from task {task_id}")
+        
+        return True
+    
     def is_node_cancelled(self, node_id: str) -> bool:
         """Check if a node has been cancelled"""
         with self.nodes_lock:

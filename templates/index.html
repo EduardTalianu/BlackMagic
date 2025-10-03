@@ -1,5 +1,5 @@
 <!doctype html>
-<title>Kali-LLM</title>
+<title>Kali-LLM Task Manager</title>
 <style>
 body{font-family:Arial;margin:1rem;height:95vh}
 .container{display:flex;gap:20px;height:100%}
@@ -14,8 +14,6 @@ h2{margin-top:0}
 .tab.active{background:#fff;border-bottom:1px solid #fff;margin-bottom:-1px}
 .tab-content{display:none;padding:10px;border:1px solid #ccc;border-top:none;flex:1;overflow-y:auto}
 .tab-content.active{display:flex;flex-direction:column}
-#terminal{background:#000;color:#0f0;font-family:monospace;white-space:pre-wrap}
-#llm_response{background:#1a1a1a;color:#ff0;font-family:monospace;white-space:pre-wrap}
 #work_dir{background:#f9f9f9;font-family:monospace;white-space:pre-wrap}
 .file-item{padding:5px;border-bottom:1px solid #eee;cursor:pointer}
 .file-item:hover{background:#f0f0f0}
@@ -26,7 +24,6 @@ h2{margin-top:0}
 .input-container{flex:1;display:flex;flex-direction:column}
 .controls-container{display:flex;gap:10px;margin-top:10px}
 .controls-container button{flex:1}
-.log-controls{margin-top:10px}
 .info-box{background:#e8f4f8;padding:10px;margin-bottom:10px;border-radius:5px}
 .path-nav{background:#f0f0f0;padding:5px;margin-bottom:10px;border-radius:5px}
 .path-nav button{padding:2px 8px;font-size:12px;width:auto;margin:0 2px}
@@ -35,7 +32,6 @@ h2{margin-top:0}
 .config-controls{display:flex;gap:10px;align-items:center;margin-top:5px}
 .config-controls input{padding:5px;width:80px}
 .config-controls button{padding:5px 15px;width:auto}
-.countdown{color:#666;font-size:0.9em;font-style:italic}
 .translation-section{background:#e3f2fd;padding:10px;margin-bottom:10px;border-radius:5px;border:1px solid #2196f3;display:none}
 .translation-section.active{display:block}
 .translation-content{background:#fff;padding:10px;margin-top:10px;border-radius:5px;border:1px solid #ccc;max-height:200px;overflow-y:auto}
@@ -44,11 +40,39 @@ h2{margin-top:0}
 .translation-field div{color:#424242;white-space:pre-wrap}
 #askInput{height:120px}
 .workflow-status{background:#f5f5f5;padding:8px;margin:10px 0;border-left:3px solid #2196f3;font-size:0.9em}
+.task-item{padding:10px;margin:5px 0;border:1px solid #ddd;border-radius:5px;cursor:pointer}
+.task-item:hover{background:#f9f9f9}
+.task-item.pending{border-left:4px solid #ffc107}
+.task-item.planning{border-left:4px solid #2196f3}
+.task-item.working{border-left:4px solid #ff9800}
+.task-item.completed{border-left:4px solid #4caf50}
+.task-item.failed{border-left:4px solid #f44336}
+.task-item.cancelled{border-left:4px solid #9e9e9e}
+.task-header{display:flex;justify-content:space-between;align-items:center}
+.task-id{font-family:monospace;color:#666;font-size:0.9em}
+.task-status{font-weight:bold;padding:2px 8px;border-radius:3px;font-size:0.85em}
+.task-status.pending{background:#fff3cd;color:#856404}
+.task-status.planning{background:#cfe2ff;color:#084298}
+.task-status.working{background:#fff3cd;color:#664d03}
+.task-status.completed{background:#d1e7dd;color:#0f5132}
+.task-status.failed{background:#f8d7da;color:#842029}
+.task-status.cancelled{background:#e2e3e5;color:#41464b}
+.mode-selector{background:#e8f5e9;padding:10px;margin-bottom:10px;border-radius:5px;border:1px solid #4caf50}
+.mode-selector label{display:block;margin:5px 0;cursor:pointer}
+.mode-selector input[type="radio"]{margin-right:8px}
+.mermaid-container{width:100%;height:100%;overflow:auto}
 </style>
 <div class="container">
   <div class="left-column">
     <h2>Task Input</h2>
-    <div class="config-section">
+    
+    <div class="mode-selector">
+      <strong>🎯 Execution Mode</strong>
+      <label><input type="radio" name="mode" value="hierarchical" checked> Hierarchical (Auto-split into sub-tasks)</label>
+      <label><input type="radio" name="mode" value="legacy"> Legacy (Step-by-step with manual continue)</label>
+    </div>
+    
+    <div class="config-section" id="legacyConfig" style="display:none">
       <strong>Auto-Continue Settings</strong>
       <div class="config-controls">
         <label>Delay (seconds):</label>
@@ -56,6 +80,7 @@ h2{margin-top:0}
         <button id="updateConfig" style="width:auto">Update</button>
       </div>
     </div>
+    
     <div class="translation-section" id="translationSection">
       <strong>📋 Translated Task</strong>
       <div class="translation-content" id="translationContent">
@@ -73,6 +98,7 @@ h2{margin-top:0}
         </div>
       </div>
     </div>
+    
     <div class="input-container">
       <form id="form">
         <label>What do you want to accomplish?</label><br>
@@ -88,15 +114,61 @@ h2{margin-top:0}
       <div id="status"></div>
     </div>
   </div>
+  
   <div class="right-column">
     <h2>Output</h2>
     <div class="tabs">
-      <div class="tab active" data-tab="terminal">Terminal</div>
-      <div class="tab" data-tab="llm_response">LLM Response</div>
+      <div class="tab active" data-tab="task_status">Task Status</div>
+      <div class="tab" data-tab="graph_view">Task Graph</div>
+      <div class="tab" data-tab="terminal_output">Terminal Output</div>
+      <div class="tab" data-tab="llm_output">LLM Responses</div>
       <div class="tab" data-tab="work_dir">Work Directory</div>
     </div>
-    <div id="terminal" class="tab-content active"></div>
-    <div id="llm_response" class="tab-content"></div>
+    
+    <div id="task_status" class="tab-content active">
+      <div style="margin-bottom:10px">
+        <button id="refreshTasks" style="width:auto;padding:5px 15px">🔄 Refresh Tasks</button>
+        <span id="taskCount" style="margin-left:10px;color:#666"></span>
+      </div>
+      <div id="taskList">Loading tasks...</div>
+    </div>
+    
+    <div id="graph_view" class="tab-content">
+      <div style="margin-bottom:10px">
+        <label>Task ID: </label>
+        <input type="text" id="graphTaskId" placeholder="Enter task ID" style="width:150px;padding:5px">
+        <button id="loadGraph" style="width:auto;padding:5px 15px">Load Graph</button>
+        <button id="autoRefreshGraph" style="width:auto;padding:5px 15px;margin-left:10px">Auto-Refresh: OFF</button>
+      </div>
+      <div class="mermaid-container" id="mermaidContainer">
+        <div style="color:#999;text-align:center;padding:20px">Enter a task ID and click "Load Graph" to view the task execution tree</div>
+      </div>
+    </div>
+    
+    <div id="terminal_output" class="tab-content">
+      <div style="margin-bottom:10px">
+        <label>Task ID: </label>
+        <input type="text" id="terminalTaskId" placeholder="Enter task ID" style="width:150px;padding:5px">
+        <button id="loadTerminal" style="width:auto;padding:5px 15px">Load Output</button>
+        <button id="autoRefreshTerminal" style="width:auto;padding:5px 15px;margin-left:10px">Auto-Refresh: OFF</button>
+      </div>
+      <div id="terminalContent" style="background:#000;color:#0f0;font-family:monospace;white-space:pre-wrap;padding:10px;height:calc(100% - 60px);overflow-y:auto">
+        No terminal output loaded. Enter a task ID and click "Load Output".
+      </div>
+    </div>
+    
+    <div id="llm_output" class="tab-content">
+      <div style="margin-bottom:10px">
+        <label>Task ID: </label>
+        <input type="text" id="llmTaskId" placeholder="Enter task ID" style="width:150px;padding:5px">
+        <button id="loadLLM" style="width:auto;padding:5px 15px">Load Responses</button>
+        <button id="autoRefreshLLM" style="width:auto;padding:5px 15px;margin-left:10px">Auto-Refresh: OFF</button>
+      </div>
+      <div id="llmContent" style="background:#1a1a1a;color:#ff0;font-family:monospace;white-space:pre-wrap;padding:10px;height:calc(100% - 60px);overflow-y:auto">
+        No LLM responses loaded. Enter a task ID and click "Load Responses".
+      </div>
+    </div>
+    
     <div id="work_dir" class="tab-content">
       <div class="shared-info">
         <strong>Shared Directories:</strong>
@@ -111,9 +183,16 @@ h2{margin-top:0}
     </div>
   </div>
 </div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
 <script>
-const terminal=document.getElementById('terminal');
-const llm_response=document.getElementById('llm_response');
+mermaid.initialize({ startOnLoad: false, theme: 'default' });
+
+// DOM Elements
+const terminalContent=document.getElementById('terminalContent');
+const llmContent=document.getElementById('llmContent');
+const task_status=document.getElementById('task_status');
+const graph_view=document.getElementById('graph_view');
 const work_dir=document.getElementById('work_dir');
 const file_list=document.getElementById('file_list');
 const file_content=document.getElementById('file_content');
@@ -134,14 +213,52 @@ const taskAbstract=document.getElementById('taskAbstract');
 const taskDescription=document.getElementById('taskDescription');
 const taskVerification=document.getElementById('taskVerification');
 const workflowStatus=document.getElementById('workflowStatus');
+const taskList=document.getElementById('taskList');
+const refreshTasks=document.getElementById('refreshTasks');
+const taskCount=document.getElementById('taskCount');
+const graphTaskId=document.getElementById('graphTaskId');
+const loadGraph=document.getElementById('loadGraph');
+const autoRefreshGraph=document.getElementById('autoRefreshGraph');
+const terminalTaskId=document.getElementById('terminalTaskId');
+const loadTerminal=document.getElementById('loadTerminal');
+const autoRefreshTerminal=document.getElementById('autoRefreshTerminal');
+const llmTaskId=document.getElementById('llmTaskId');
+const loadLLM=document.getElementById('loadLLM');
+const autoRefreshLLM=document.getElementById('autoRefreshLLM');
+const mermaidContainer=document.getElementById('mermaidContainer');
+const legacyConfig=document.getElementById('legacyConfig');
 
+// State Variables
 let currentDirPath = '/app';
 let autoContDelay = 10;
 let countdownTimer = null;
 let countdownSeconds = 0;
 let translatedTask = null;
+let currentTaskId = null;
+let currentMode = 'hierarchical';
+let pollingInterval = null;
+let graphAutoRefresh = false;
+let terminalAutoRefresh = false;
+let llmAutoRefresh = false;
+let graphRefreshInterval = null;
+let terminalRefreshInterval = null;
+let llmRefreshInterval = null;
 
-// Load configuration on startup
+// Mode selector
+document.querySelectorAll('input[name="mode"]').forEach(radio => {
+  radio.addEventListener('change', (e) => {
+    currentMode = e.target.value;
+    legacyConfig.style.display = currentMode === 'legacy' ? 'block' : 'none';
+    
+    if (currentMode === 'hierarchical') {
+      document.querySelector('.tab[data-tab="task_status"]').click();
+    } else {
+      document.querySelector('.tab[data-tab="terminal_output"]').click();
+    }
+  });
+});
+
+// Load configuration
 async function loadConfig(){
   try {
     const r=await fetch('/config');
@@ -183,15 +300,16 @@ document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.add('active');
     document.getElementById(tab.dataset.tab).classList.add('active');
     
-    // Load files when work directory tab is clicked
     if (tab.dataset.tab === 'work_dir') {
       loadSharedInfo();
       loadFiles(currentDirPath);
+    } else if (tab.dataset.tab === 'task_status') {
+      loadAllTasks();
     }
   });
 });
 
-// Enter key support
+// Keyboard shortcuts
 askInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.ctrlKey) {
     e.preventDefault();
@@ -203,7 +321,7 @@ askInput.addEventListener('keydown', (e) => {
   }
 });
 
-// Translate button handler
+// Button handlers
 translateBtn.onclick=async()=>{
   await translateTask();
 };
@@ -224,9 +342,9 @@ continueBtn.onclick=async()=>{
 
 resetBtn.onclick=async()=>{
   clearCountdown();
+  stopAllRefresh();
   await fetch('/reset',{method:'POST'});
-  terminal.textContent='';
-  llm_response.textContent='';
+  terminalContent.textContent='';
   status.textContent='Session reset. Ready for new task.';
   workflowStatus.style.display='none';
   continueBtn.style.display='none';
@@ -234,6 +352,8 @@ resetBtn.onclick=async()=>{
   translatedTask = null;
   translationSection.classList.remove('active');
   translateBtn.disabled = false;
+  currentTaskId = null;
+  stopPolling();
 };
 
 parentDirBtn.onclick=async()=>{
@@ -242,6 +362,132 @@ parentDirBtn.onclick=async()=>{
     await navigateToDirectory(parentPath);
   }
 };
+
+refreshTasks.onclick=async()=>{
+  await loadAllTasks();
+};
+
+// Auto-refresh controls
+loadGraph.onclick=async()=>{
+  const taskId = graphTaskId.value.trim();
+  if (!taskId) {
+    status.textContent = '⚠️ Please enter a task ID';
+    return;
+  }
+  await loadTaskGraph(taskId);
+};
+
+autoRefreshGraph.onclick=()=>{
+  toggleAutoRefresh('graph');
+};
+
+loadTerminal.onclick=async()=>{
+  const taskId = terminalTaskId.value.trim();
+  if (!taskId) {
+    status.textContent = '⚠️ Please enter a task ID';
+    return;
+  }
+  await loadTerminalOutput(taskId);
+};
+
+autoRefreshTerminal.onclick=()=>{
+  toggleAutoRefresh('terminal');
+};
+
+loadLLM.onclick=async()=>{
+  const taskId = llmTaskId.value.trim();
+  if (!taskId) {
+    status.textContent = '⚠️ Please enter a task ID';
+    return;
+  }
+  await loadLLMOutput(taskId);
+};
+
+autoRefreshLLM.onclick=()=>{
+  toggleAutoRefresh('llm');
+};
+
+function toggleAutoRefresh(type){
+  if(type === 'graph'){
+    graphAutoRefresh = !graphAutoRefresh;
+    autoRefreshGraph.textContent = graphAutoRefresh ? 'Auto-Refresh: ON' : 'Auto-Refresh: OFF';
+    autoRefreshGraph.style.background = graphAutoRefresh ? '#4caf50' : '';
+    autoRefreshGraph.style.color = graphAutoRefresh ? '#fff' : '';
+    
+    if(graphAutoRefresh){
+      const taskId = graphTaskId.value.trim();
+      if(taskId){
+        graphRefreshInterval = setInterval(()=>loadTaskGraph(taskId), 3000);
+      }
+    } else {
+      if(graphRefreshInterval){
+        clearInterval(graphRefreshInterval);
+        graphRefreshInterval = null;
+      }
+    }
+  } else if(type === 'terminal'){
+    terminalAutoRefresh = !terminalAutoRefresh;
+    autoRefreshTerminal.textContent = terminalAutoRefresh ? 'Auto-Refresh: ON' : 'Auto-Refresh: OFF';
+    autoRefreshTerminal.style.background = terminalAutoRefresh ? '#4caf50' : '';
+    autoRefreshTerminal.style.color = terminalAutoRefresh ? '#fff' : '';
+    
+    if(terminalAutoRefresh){
+      const taskId = terminalTaskId.value.trim();
+      if(taskId){
+        terminalRefreshInterval = setInterval(()=>loadTerminalOutput(taskId), 3000);
+      }
+    } else {
+      if(terminalRefreshInterval){
+        clearInterval(terminalRefreshInterval);
+        terminalRefreshInterval = null;
+      }
+    }
+  } else if(type === 'llm'){
+    llmAutoRefresh = !llmAutoRefresh;
+    autoRefreshLLM.textContent = llmAutoRefresh ? 'Auto-Refresh: ON' : 'Auto-Refresh: OFF';
+    autoRefreshLLM.style.background = llmAutoRefresh ? '#4caf50' : '';
+    autoRefreshLLM.style.color = llmAutoRefresh ? '#fff' : '';
+    
+    if(llmAutoRefresh){
+      const taskId = llmTaskId.value.trim();
+      if(taskId){
+        llmRefreshInterval = setInterval(()=>loadLLMOutput(taskId), 3000);
+      }
+    } else {
+      if(llmRefreshInterval){
+        clearInterval(llmRefreshInterval);
+        llmRefreshInterval = null;
+      }
+    }
+  }
+}
+
+function stopAllRefresh(){
+  if(graphRefreshInterval){
+    clearInterval(graphRefreshInterval);
+    graphRefreshInterval = null;
+  }
+  if(terminalRefreshInterval){
+    clearInterval(terminalRefreshInterval);
+    terminalRefreshInterval = null;
+  }
+  if(llmRefreshInterval){
+    clearInterval(llmRefreshInterval);
+    llmRefreshInterval = null;
+  }
+  graphAutoRefresh = false;
+  terminalAutoRefresh = false;
+  llmAutoRefresh = false;
+  autoRefreshGraph.textContent = 'Auto-Refresh: OFF';
+  autoRefreshGraph.style.background = '';
+  autoRefreshGraph.style.color = '';
+  autoRefreshTerminal.textContent = 'Auto-Refresh: OFF';
+  autoRefreshTerminal.style.background = '';
+  autoRefreshTerminal.style.color = '';
+  autoRefreshLLM.textContent = 'Auto-Refresh: OFF';
+  autoRefreshLLM.style.background = '';
+  autoRefreshLLM.style.color = '';
+}
 
 function clearCountdown(){
   if(countdownTimer){
@@ -256,7 +502,7 @@ function startCountdown(seconds, callback){
   
   const updateStatus=()=>{
     if(countdownSeconds > 0){
-      status.innerHTML=`⏸️ Task in progress... <span class="countdown">Auto-continuing in ${countdownSeconds}s</span>`;
+      status.innerHTML=`⏸️ Task in progress... <span style="color:#666;font-size:0.9em;font-style:italic">Auto-continuing in ${countdownSeconds}s</span>`;
       countdownSeconds--;
     } else {
       clearCountdown();
@@ -296,16 +542,13 @@ async function translateTask(){
       return;
     }
     
-    // Store translated task
     translatedTask = data.translated_task;
     
-    // Display translated task
     taskAbstract.textContent = translatedTask.abstract;
     taskDescription.textContent = translatedTask.description;
     taskVerification.textContent = translatedTask.verification;
     translationSection.classList.add('active');
     
-    // Enable start button
     startBtn.disabled = false;
     status.textContent='✅ Task translated successfully! Click "Start Execution" to begin.';
     workflowStatus.textContent='Step 1/2: ✓ Task translated. Ready for execution.';
@@ -314,6 +557,379 @@ async function translateTask(){
     status.textContent=`❌ Translation error: ${e.message}`;
     workflowStatus.style.display='none';
     translateBtn.disabled = false;
+  }
+}
+
+async function startTask(){
+  if(!translatedTask){
+    status.textContent='⚠️ Please translate the task first';
+    return;
+  }
+  
+  if (currentMode === 'hierarchical') {
+    await startHierarchicalTask();
+  } else {
+    await startLegacyTask();
+  }
+}
+
+async function startHierarchicalTask(){
+  clearCountdown();
+  status.textContent='⏳ Creating task...';
+  workflowStatus.style.display='block';
+  workflowStatus.textContent='Step 2/2: Creating hierarchical task execution...';
+  startBtn.disabled = true;
+  translateBtn.disabled = true;
+  
+  try {
+    const r=await fetch('/task',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({translated_task:translatedTask})
+    });
+    
+    const data=await r.json();
+    
+    if(data.error){
+      status.textContent=`❌ Failed to create task: ${data.error}`;
+      workflowStatus.style.display='none';
+      startBtn.disabled = false;
+      return;
+    }
+    
+    currentTaskId = data.task_id;
+    graphTaskId.value = currentTaskId;
+    terminalTaskId.value = currentTaskId;
+    llmTaskId.value = currentTaskId;
+    
+    status.textContent=`✅ Task created: ${currentTaskId}. Executing in background...`;
+    workflowStatus.textContent=`Step 2/2: Task ${currentTaskId} is now executing. Switch to Terminal Output or LLM Responses tabs to monitor.`;
+    
+    // Immediately load the task list to show it
+    console.log('[UI] Task created, loading task list...');
+    await loadAllTasks();
+    
+    document.querySelector('.tab[data-tab="terminal_output"]').click();
+    
+    // Enable all auto-refresh
+    graphAutoRefresh = true;
+    autoRefreshGraph.textContent = 'Auto-Refresh: ON';
+    autoRefreshGraph.style.background = '#4caf50';
+    autoRefreshGraph.style.color = '#fff';
+    graphRefreshInterval = setInterval(()=>loadTaskGraph(currentTaskId), 3000);
+    
+    terminalAutoRefresh = true;
+    autoRefreshTerminal.textContent = 'Auto-Refresh: ON';
+    autoRefreshTerminal.style.background = '#4caf50';
+    autoRefreshTerminal.style.color = '#fff';
+    terminalRefreshInterval = setInterval(()=>loadTerminalOutput(currentTaskId), 3000);
+    
+    llmAutoRefresh = true;
+    autoRefreshLLM.textContent = 'Auto-Refresh: ON';
+    autoRefreshLLM.style.background = '#4caf50';
+    autoRefreshLLM.style.color = '#fff';
+    llmRefreshInterval = setInterval(()=>loadLLMOutput(currentTaskId), 3000);
+    
+    startPolling(currentTaskId);
+    
+  } catch (e) {
+    console.error('[UI] Error creating task:', e);
+    status.textContent=`❌ Error: ${e.message}`;
+    workflowStatus.style.display='none';
+    startBtn.disabled = false;
+  }
+}
+
+async function startLegacyTask(){
+  clearCountdown();
+  terminalContent.textContent='';
+  status.textContent='⏳ Processing...';
+  workflowStatus.style.display='block';
+  workflowStatus.textContent='Step 2/2: Executing task...';
+  continueBtn.style.display='none';
+  startBtn.disabled = true;
+  translateBtn.disabled = true;
+  
+  document.querySelector('.tab[data-tab="terminal_output"]').click();
+  
+  const r=await fetch('/run',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      ask:askInput.value.trim(),
+      translated_task:translatedTask
+    })
+  });
+  const data=await r.json();
+  updateLegacyUI(data);
+}
+
+async function continueTask(){
+  status.textContent='⏳ Processing...';
+  continueBtn.style.display='none';
+  
+  const r=await fetch('/run',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({continue:true})
+  });
+  const data=await r.json();
+  updateLegacyUI(data);
+}
+
+function updateLegacyUI(data){
+  if(data.error){
+    clearCountdown();
+    terminalContent.textContent+=`\n❌ Error: ${data.error}`;
+    status.textContent='❌ Task failed';
+    startBtn.disabled = false;
+    return;
+  }
+  
+  terminalContent.textContent+=data.output+'\n\n';
+  terminalContent.scrollTop = terminalContent.scrollHeight;
+  
+  if(data.done){
+    clearCountdown();
+    if(data.summary){
+      terminalContent.textContent+=`\n\n✅ Task completed: ${data.summary}`;
+    }
+    status.textContent='✅ Task completed';
+    workflowStatus.textContent='Step 2/2: ✓ Task execution completed successfully!';
+    continueBtn.style.display='none';
+    startBtn.disabled = true;
+    translateBtn.disabled = false;
+    translatedTask = null;
+  } else {
+    const delay=data.auto_continue_delay || autoContDelay;
+    continueBtn.style.display='inline-block';
+    workflowStatus.textContent='Step 2/2: Task execution in progress...';
+    
+    if(data.auto_continue){
+      startCountdown(delay, continueTask);
+    } else {
+      status.textContent='⏸️ Task in progress... (click Continue)';
+    }
+  }
+}
+
+async function loadAllTasks(){
+  try {
+    const r=await fetch('/task/status');
+    const data=await r.json();
+    
+    console.log('[UI] Task status response:', data);
+    
+    if(data.error){
+      taskList.textContent=`Error: ${data.error}`;
+      return;
+    }
+    
+    if(!data.tasks || data.tasks.length === 0){
+      taskList.innerHTML='<div style="color:#999;text-align:center;padding:20px">No tasks yet. Create a task to get started.</div>';
+      taskCount.textContent='';
+      return;
+    }
+    
+    console.log('[UI] Total entries:', data.tasks.length);
+    
+    // Separate root tasks and nodes
+    const rootTasks = data.tasks.filter(t => t.type === 'root');
+    const nodes = data.tasks.filter(t => t.type === 'node');
+    
+    console.log('[UI] Root tasks:', rootTasks.length, 'Nodes:', nodes.length);
+    
+    taskCount.textContent=`Total tasks: ${rootTasks.length}, Total nodes: ${nodes.length}`;
+    
+    taskList.innerHTML='';
+    
+    if(rootTasks.length === 0){
+      taskList.innerHTML='<div style="color:#999;text-align:center;padding:20px">No tasks found (but we have data). Check console for debug info.</div>';
+      console.log('[UI] All task entries:', data.tasks);
+      return;
+    }
+    
+    // Display each root task with its nodes
+    rootTasks.forEach(task => {
+      const taskItem=document.createElement('div');
+      taskItem.className=`task-item ${task.status}`;
+      taskItem.innerHTML=`
+        <div class="task-header">
+          <span class="task-id">🎯 ${task.task_id}</span>
+          <span class="task-status ${task.status}">${task.status.toUpperCase()}</span>
+        </div>
+        <div style="margin-top:5px;font-weight:bold">${task.abstract}</div>
+        <div style="margin-top:5px;font-size:0.9em;color:#666">${task.created_at}</div>
+      `;
+      taskItem.onclick=()=>viewTaskDetails(task.task_id);
+      taskList.appendChild(taskItem);
+      
+      // Add child nodes
+      const taskNodes = nodes.filter(n => n.task_id === task.task_id);
+      if(taskNodes.length > 0){
+        taskNodes.forEach(node => {
+          const nodeItem=document.createElement('div');
+          nodeItem.className=`task-item ${node.status}`;
+          nodeItem.style.marginLeft='30px';
+          nodeItem.style.borderLeft='3px solid #ccc';
+          nodeItem.innerHTML=`
+            <div class="task-header">
+              <span class="task-id">📦 ${node.node_id}</span>
+              <span class="task-status ${node.status}">${node.status.toUpperCase()}</span>
+            </div>
+            <div style="margin-top:5px">${node.abstract}</div>
+            <div style="margin-top:5px;font-size:0.8em;color:#666">${node.created_at}</div>
+          `;
+          nodeItem.onclick=(e)=>{
+            e.stopPropagation();
+            viewNodeDetails(node.node_id);
+          };
+          taskList.appendChild(nodeItem);
+        });
+      }
+    });
+  } catch (e) {
+    console.error('[UI] Error loading tasks:', e);
+    taskList.textContent=`Error loading tasks: ${e.message}`;
+  }
+}
+
+async function viewNodeDetails(nodeId){
+  // For now, just show in status
+  status.textContent=`Viewing node: ${nodeId}`;
+  // TODO: Load node-specific outputs
+}
+
+async function viewTaskDetails(taskId){
+  try {
+    const r=await fetch(`/task/${taskId}`);
+    const data=await r.json();
+    
+    if(data.error){
+      status.textContent=`Error: ${data.error}`;
+      return;
+    }
+    
+    graphTaskId.value = taskId;
+    terminalTaskId.value = taskId;
+    llmTaskId.value = taskId;
+    
+    await loadTaskGraph(taskId);
+    await loadTerminalOutput(taskId);
+    await loadLLMOutput(taskId);
+    
+    document.querySelector('.tab[data-tab="graph_view"]').click();
+    
+  } catch (e) {
+    status.textContent=`Error: ${e.message}`;
+  }
+}
+
+async function loadTaskGraph(taskId){
+  try {
+    const r=await fetch(`/tree?task_id=${encodeURIComponent(taskId)}`);
+    const data=await r.json();
+    
+    if(data.error){
+      mermaidContainer.innerHTML=`<div style="color:#f44336;padding:20px">${data.error}</div>`;
+      return;
+    }
+    
+    mermaidContainer.innerHTML=`<div class="mermaid">${data.graph}</div>`;
+    mermaid.init(undefined, mermaidContainer.querySelector('.mermaid'));
+    
+  } catch (e) {
+    mermaidContainer.innerHTML=`<div style="color:#f44336;padding:20px">Error loading graph: ${e.message}</div>`;
+  }
+}
+
+async function loadTerminalOutput(taskId){
+  try {
+    const r=await fetch(`/task/${taskId}`);
+    const data=await r.json();
+    
+    if(data.error){
+      terminalContent.textContent=`Error: ${data.error}`;
+      return;
+    }
+    
+    if(!data.terminal_output || data.terminal_output.length === 0){
+      terminalContent.textContent='No terminal output yet. Task may still be planning or just started.';
+      return;
+    }
+    
+    terminalContent.textContent = data.terminal_output.join('\n');
+    terminalContent.scrollTop = terminalContent.scrollHeight;
+    
+  } catch (e) {
+    terminalContent.textContent=`Error loading terminal output: ${e.message}`;
+  }
+}
+
+async function loadLLMOutput(taskId){
+  try {
+    const r=await fetch(`/task/${taskId}`);
+    const data=await r.json();
+    
+    if(data.error){
+      llmContent.textContent=`Error: ${data.error}`;
+      return;
+    }
+    
+    if(!data.llm_responses || data.llm_responses.length === 0){
+      llmContent.textContent='No LLM responses yet. Task may still be initializing.';
+      return;
+    }
+    
+    let formatted = data.llm_responses.map((resp, idx) => {
+      return `[${idx + 1}] ${resp}`;
+    }).join('\n\n' + '='.repeat(80) + '\n\n');
+    
+    llmContent.textContent = formatted;
+    llmContent.scrollTop = llmContent.scrollHeight;
+    
+  } catch (e) {
+    llmContent.textContent=`Error loading LLM output: ${e.message}`;
+  }
+}
+
+function startPolling(taskId){
+  stopPolling();
+  
+  // Also poll the task list to keep it updated
+  const taskListRefresh = setInterval(()=>loadAllTasks(), 5000);
+  
+  pollingInterval=setInterval(async()=>{
+    try {
+      const r=await fetch(`/task/${taskId}`);
+      const data=await r.json();
+      
+      if(!data.error && (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled' || data.status === 'impossible')){
+        stopPolling();
+        stopAllRefresh();
+        clearInterval(taskListRefresh);
+        
+        await loadTerminalOutput(taskId);
+        await loadLLMOutput(taskId);
+        await loadTaskGraph(taskId);
+        
+        status.textContent=`Task ${taskId}: ${data.status}`;
+        if(data.result){
+          status.textContent+=` - ${data.result}`;
+        }
+        
+        loadAllTasks();
+      }
+    } catch (e) {
+      console.error('Polling error:', e);
+    }
+  }, 3000);
+}
+
+function stopPolling(){
+  if(pollingInterval){
+    clearInterval(pollingInterval);
+    pollingInterval=null;
   }
 }
 
@@ -343,84 +959,6 @@ async function navigateToDirectory(path){
   currentPath.textContent = path;
   parentDirBtn.style.display = path === '/' ? 'none' : 'inline-block';
   await loadFiles(path);
-}
-
-async function startTask(){
-  if(!translatedTask){
-    status.textContent='⚠️ Please translate the task first';
-    return;
-  }
-  
-  clearCountdown();
-  terminal.textContent='';
-  llm_response.textContent='';
-  status.textContent='⏳ Processing...';
-  workflowStatus.style.display='block';
-  workflowStatus.textContent='Step 2/2: Executing task...';
-  continueBtn.style.display='none';
-  startBtn.disabled = true;
-  translateBtn.disabled = true;
-  
-  const r=await fetch('/run',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      ask:askInput.value.trim(),
-      translated_task:translatedTask
-    })
-  });
-  const data=await r.json();
-  updateUI(data);
-}
-
-async function continueTask(){
-  status.textContent='⏳ Processing...';
-  continueBtn.style.display='none';
-  
-  const r=await fetch('/run',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({continue:true})
-  });
-  const data=await r.json();
-  updateUI(data);
-}
-
-function updateUI(data){
-  if(data.error){
-    clearCountdown();
-    terminal.textContent+=`\n❌ Error: ${data.error}`;
-    status.textContent='❌ Task failed';
-    startBtn.disabled = false;
-    return;
-  }
-  
-  terminal.textContent+=data.output+'\n\n';
-  llm_response.textContent=data.llm_response || '';
-  
-  if(data.done){
-    clearCountdown();
-    // Move the completion message to the LLM response area
-    if(data.summary){
-      llm_response.textContent+=`\n\n✅ Task completed: ${data.summary}`;
-    }
-    status.textContent='✅ Task completed';
-    workflowStatus.textContent='Step 2/2: ✓ Task execution completed successfully!';
-    continueBtn.style.display='none';
-    startBtn.disabled = true;
-    translateBtn.disabled = false;
-    translatedTask = null;
-  } else {
-    const delay=data.auto_continue_delay || autoContDelay;
-    continueBtn.style.display='inline-block';
-    workflowStatus.textContent='Step 2/2: Task execution in progress...';
-    
-    if(data.auto_continue){
-      startCountdown(delay, continueTask);
-    } else {
-      status.textContent='⏸️ Task in progress... (click Continue)';
-    }
-  }
 }
 
 async function loadFiles(path){
@@ -507,12 +1045,16 @@ function copyFileContent(path){
   });
 }
 
-// Load configuration and files on page load
+// Initialize on page load
 window.addEventListener('load', () => {
   loadConfig();
-  // Auto-switch to terminal tab on load
-  document.querySelector('.tab[data-tab="terminal"]').click();
+  loadAllTasks();
+  document.querySelector('.tab[data-tab="task_status"]').click();
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+  stopPolling();
+  stopAllRefresh();
 });
 </script>
-</document_content>
-</invoke>

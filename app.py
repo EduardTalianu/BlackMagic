@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """
-app.py - Main Flask application with task translation
+app.py - Main Flask application with hierarchical task management
 """
 import os
 import re
 import docker
 import requests
+import traceback
+import sys
 from flask import Flask, request, render_template_string, jsonify, session
 from flask_session import Session
 import datetime
 import json
 
-# Import the task translator
-from src.task_translator import create_translator, TaskModel
+# Import task management system
+try:
+    from src.task_translator import create_translator, TaskModel
+    from src.task_manager import TaskManager
+    print("✓ Task management modules imported successfully")
+except ImportError as e:
+    print(f"✗ Failed to import task management modules: {e}")
+    traceback.print_exc()
+    sys.exit(1)
 
 app = Flask(__name__)
 app.config["SESSION_PERMANENT"] = False
@@ -21,8 +30,9 @@ Session(app)
 
 LLM_URL = os.getenv("LLM_BASE_URL", "https://api.moonshot.ai/v1") + "/chat/completions"
 LLM_KEY = os.getenv("MOONSHOT_API_KEY")
+LLM_MODEL = os.getenv("LLM_MODEL", "moonshot-v1-8k")
 KALI_NAME = "kali-llm-web-kali-1"
-WORK_DIR = "/app"
+WORK_DIR = "/app/work"
 TASK_DIR = "/app/work"
 LOG_DIR = "/app/logs"
 SHARED_DIR = "/shared"
@@ -43,9 +53,27 @@ TRANSLATION_LOG = os.path.join(LOG_DIR, "translation.log")
 # Initialize task translator
 try:
     task_translator = create_translator()
+    print("✓ Task translator initialized successfully")
 except Exception as e:
-    print(f"Warning: Task translator initialization failed: {e}")
+    print(f"✗ Warning: Task translator initialization failed: {e}")
+    traceback.print_exc()
     task_translator = None
+
+# Initialize global task manager
+try:
+    task_manager = TaskManager(
+        container_name=KALI_NAME,
+        llm_url=LLM_URL,
+        llm_key=LLM_KEY,
+        model=LLM_MODEL,
+        work_dir=TASK_DIR
+    )
+    print("✓ Task manager initialized successfully")
+except Exception as e:
+    print(f"✗ Warning: Task manager initialization failed: {e}")
+    traceback.print_exc()
+    task_manager = None
+
 
 def log_action(action, output):
     """Log all actions and their outputs to a file"""
@@ -54,12 +82,14 @@ def log_action(action, output):
     with open(ACTION_LOG, 'a') as f:
         f.write(log_entry)
 
+
 def log_llm_response(response):
     """Log LLM responses to a file"""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] LLM Response:\n{response}\n{'='*50}\n"
     with open(LLM_RESPONSE_LOG, 'a') as f:
         f.write(log_entry)
+
 
 def log_translation(user_request, translated_task):
     """Log task translations to a file"""
@@ -68,6 +98,7 @@ def log_translation(user_request, translated_task):
     with open(TRANSLATION_LOG, 'a') as f:
         f.write(log_entry)
 
+
 def get_install_log():
     """Read the installation log file"""
     if os.path.exists(INSTALL_LOG):
@@ -75,12 +106,14 @@ def get_install_log():
             return f.read()
     return "No tools installed yet."
 
+
 def update_install_log(tool_name):
     """Add a tool to the installation log"""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] Installed: {tool_name}\n"
     with open(INSTALL_LOG, 'a') as f:
         f.write(log_entry)
+
 
 def get_system_prompt(task: TaskModel):
     """Generate system prompt with task context and installation history"""
@@ -144,6 +177,7 @@ Installation history:
 
 REMEMBER: Respond with ONLY the command, nothing else. No explanations, no markdown, just the command."""
 
+
 def extract_command(response: str) -> str:
     """Extract the actual command from LLM response, removing markdown and explanations"""
     response = response.strip()
@@ -176,9 +210,10 @@ def extract_command(response: str) -> str:
     
     return response
 
+
 def llm_next_command(conversation_history: list) -> str:
     payload = {
-        "model": os.getenv("LLM_MODEL", "moonshot-v1-8k"),
+        "model": LLM_MODEL,
         "temperature": 0,
         "messages": conversation_history
     }
@@ -192,6 +227,7 @@ def llm_next_command(conversation_history: list) -> str:
     log_llm_response(f"EXTRACTED: {command}")
     
     return command
+
 
 def kali_exec(cmd: str) -> tuple[str, bool]:
     """Execute command and return (output, tool_installed)"""
@@ -217,6 +253,7 @@ def kali_exec(cmd: str) -> tuple[str, bool]:
     
     log_action(cmd, output)
     return output, tool_installed
+
 
 def list_directory(path):
     """List the contents of a directory"""
@@ -258,6 +295,7 @@ def list_directory(path):
     
     return files
 
+
 def get_file_content(path):
     """Get the content of a file"""
     c = docker.from_env().containers.get(KALI_NAME)
@@ -274,10 +312,12 @@ def get_file_content(path):
     
     return content, None
 
+
 @app.route("/")
 def index():
     with open("templates/index.html") as f:
         return render_template_string(f.read())
+
 
 @app.route("/translate", methods=["POST"])
 def translate():
@@ -309,8 +349,129 @@ def translate():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/task", methods=["POST"])
+def create_task():
+    """Create a new hierarchical task - returns immediately with task_id"""
+    try:
+        data = request.json
+        translated_task = data.get("translated_task")
+        
+        if not translated_task:
+            return jsonify({"error": "Translated task is required"}), 400
+        
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        # Convert dict to TaskModel
+        try:
+            task = TaskModel(**translated_task)
+        except Exception as e:
+            return jsonify({"error": f"Invalid task structure: {e}"}), 400
+        
+        # Create task and get task_id
+        task_id = task_manager.create_task(task)
+        
+        return jsonify({
+            "task_id": task_id,
+            "status": "pending",
+            "message": "Task created and queued for execution"
+        }), 202
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/task/status", methods=["GET"])
+def get_all_tasks():
+    """Get status of all tasks"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        tasks = task_manager.list_all_tasks()
+        
+        # Debug logging
+        print(f"[API] Returning {len(tasks)} task/node entries")
+        for t in tasks[:5]:  # Log first 5
+            print(f"[API]   - {t.get('type', 'unknown')}: {t.get('abstract', 'N/A')[:50]}")
+        
+        return jsonify({"tasks": tasks})
+        
+    except Exception as e:
+        print(f"[API] Error in get_all_tasks: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/task/<task_id>", methods=["GET"])
+def get_task_status(task_id):
+    """Get status of a specific task"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        status = task_manager.get_task_status(task_id)
+        if not status:
+            return jsonify({"error": "Task not found"}), 404
+        
+        # Log to console for debugging
+        print(f"[API] Task {task_id} status: {status.get('status')}")
+        if status.get('error'):
+            print(f"[API] Task {task_id} error: {status.get('error')}")
+        
+        return jsonify(status)
+        
+    except Exception as e:
+        print(f"[API] Error getting task status: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/task/<task_id>/stop", methods=["PUT"])
+def cancel_task(task_id):
+    """Cancel a running task"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        success = task_manager.cancel_task(task_id)
+        if success:
+            return jsonify({"status": "cancelled", "task_id": task_id})
+        else:
+            return jsonify({"error": "Task not found or cannot be cancelled"}), 400
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/tree", methods=["GET"])
+def get_task_tree():
+    """Get Mermaid graph for a task"""
+    try:
+        task_id = request.args.get('task_id')
+        if not task_id:
+            return jsonify({"error": "task_id parameter required"}), 400
+        
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        graph = task_manager.get_task_graph(task_id)
+        if not graph:
+            return jsonify({"error": "Task not found or graph not available"}), 404
+        
+        return jsonify({"task_id": task_id, "graph": graph})
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Legacy endpoints for backward compatibility
 @app.route("/run", methods=["POST"])
 def run():
+    """Legacy endpoint - kept for backward compatibility"""
     try:
         data = request.json
         ask = data.get("ask", "").strip()
@@ -384,12 +545,14 @@ def run():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/reset", methods=["POST"])
 def reset():
     session.pop("conversation", None)
     session.pop("last_cmd", None)
     session.pop("current_task", None)
     return jsonify({"status": "Conversation reset"})
+
 
 @app.route("/config", methods=["GET", "POST"])
 def config():
@@ -409,6 +572,7 @@ def config():
             "auto_continue_delay": AUTO_CONTINUE_DELAY
         })
 
+
 @app.route("/files", methods=["GET"])
 def get_files():
     try:
@@ -424,6 +588,7 @@ def get_files():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/file", methods=["GET"])
 def get_file():
     try:
@@ -437,6 +602,7 @@ def get_file():
         return jsonify({"content": content})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/shared_info", methods=["GET"])
 def get_shared_info():
@@ -453,6 +619,7 @@ def get_shared_info():
         return jsonify(shared_info)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -48,6 +48,10 @@ class TaskManager:
         self.nodes: Dict[str, dict] = {}
         self.nodes_lock = Lock()
         
+        # TRM storage: task_id -> TaskRelationManager (to access graph data)
+        self.trms: Dict[str, TaskRelationManager] = {}
+        self.trms_lock = Lock()
+        
         # Thread pool for background execution (increased for parallel nodes)
         self.executor = ThreadPoolExecutor(max_workers=10)
         
@@ -116,16 +120,37 @@ class TaskManager:
         }
     
     def list_all_tasks(self) -> list:
-        """List all tasks with their current status"""
-        return [
-            {
+        """List all tasks and nodes with their current status by reading from TRM"""
+        result = []
+        
+        # Add root tasks
+        for task_id, info in self.tasks.items():
+            result.append({
+                'type': 'root',
                 'task_id': task_id,
-                'status': info['status'].value,
+                'status': info['status'].value if isinstance(info['status'], TaskStatus) else info['status'],
                 'abstract': info['task_model'].abstract,
                 'created_at': info['created_at'].isoformat()
-            }
-            for task_id, info in self.tasks.items()
-        ]
+            })
+            
+            # Get all nodes from TRM for this task
+            with self.trms_lock:
+                if task_id in self.trms:
+                    trm = self.trms[task_id]
+                    with trm.lock:
+                        for node_id, node_data in trm.nodes.items():
+                            result.append({
+                                'type': 'node',
+                                'task_id': task_id,
+                                'node_id': node_id,
+                                'status': node_data.get('status', 'unknown'),
+                                'abstract': node_data.get('abstract', 'N/A'),
+                                'parent_id': node_data.get('parent_id'),
+                                'created_at': datetime.now().isoformat()  # TRM doesn't store timestamps
+                            })
+        
+        print(f"[TaskManager] list_all_tasks returning {len(result)} entries")
+        return result
     
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task"""
@@ -157,6 +182,12 @@ class TaskManager:
                 'cancelled': False
             }
             print(f"[{task_id}] Registered node {node_id}: {node_info.get('abstract', '')[:50]}")
+    
+    def register_trm(self, task_id: str, trm: TaskRelationManager):
+        """Register a TRM instance for a task"""
+        with self.trms_lock:
+            self.trms[task_id] = trm
+            print(f"[{task_id}] Registered TRM")
     
     def update_node_status(self, node_id: str, status: str, error: str = None):
         """Update status of a specific node"""
@@ -246,17 +277,6 @@ class TaskManager:
                 return f.read()
         
         return None
-        """Get the Mermaid graph for a task"""
-        task_info = self.tasks.get(task_id)
-        if not task_info:
-            return None
-        
-        graph_file = task_info['graph_file']
-        if os.path.exists(graph_file):
-            with open(graph_file, 'r') as f:
-                return f.read()
-        
-        return None
     
     def _run_background_task(self, task_id: str):
         """
@@ -273,6 +293,9 @@ class TaskManager:
             
             # Create task relation manager (graph)
             trm = TaskRelationManager(task_info['graph_file'])
+            
+            # Register TRM so list_all_tasks can access it
+            self.register_trm(task_id, trm)
             
             # Generate root node ID
             root_node_id = trm.generate_node_id()
@@ -311,7 +334,6 @@ class TaskManager:
             print(f"[{task_id}] Created MCP client")
             
             # Create a new TaskModel instance with node_id set
-            # Pydantic v2 doesn't allow setattr for fields, so we recreate the model
             task_dict = task_info['task_model'].model_dump()
             task_dict['node_id'] = root_node_id
             task_info['task_model'] = TaskModel(**task_dict)
@@ -319,7 +341,7 @@ class TaskManager:
             print(f"[{task_id}] Set node_id in task model")
             print(f"[{task_id}] Task model: abstract={task_info['task_model'].abstract}, node_id={task_info['task_model'].node_id}")
             
-            # Create root TaskNode
+            # Create root TaskNode (it will register itself)
             root_node = TaskNode(
                 task_model=task_info['task_model'],
                 trm=trm,
@@ -365,7 +387,6 @@ class TaskManager:
     
     def _log_message(self, task_id: str, message: str):
         """Log messages for debugging (optional)"""
-        # Could write to a task-specific log file
         log_file = os.path.join(self.work_dir, f"{task_id}.log")
         with open(log_file, 'a') as f:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

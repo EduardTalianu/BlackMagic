@@ -4,13 +4,25 @@
 <title>Kali-LLM Task Manager</title>
 <style>
 *{box-sizing:border-box}
-body{font-family:Arial,sans-serif;margin:0;padding:1rem;height:100vh;overflow:hidden}
+:root{
+  --bg:#fff;--fg:#000;--card-bg:#fff;--card-border:#ddd;
+  --input-bg:#fff;--input-border:#ccc;--status-bg:#f5f5f5;
+  --tab-inactive:#666;--tab-active:#2196f3;--task-bg:#fff;
+  --hover-bg:#f9f9f9;--grid-border:#e0e0e0;--badge-bg:#f5f5f5;
+}
+body.dark{
+  --bg:#1a1a1a;--fg:#e0e0e0;--card-bg:#2d2d2d;--card-border:#444;
+  --input-bg:#1a1a1a;--input-border:#555;--status-bg:#2d2d2d;
+  --tab-inactive:#aaa;--tab-active:#64b5f6;--task-bg:#2d2d2d;
+  --hover-bg:#3d3d3d;--grid-border:#444;--badge-bg:#3d3d3d;
+}
+body{font-family:Arial,sans-serif;margin:0;padding:1rem;height:100vh;overflow:hidden;background:var(--bg);color:var(--fg);transition:all 0.3s}
 .container{display:flex;gap:20px;height:calc(100vh - 2rem)}
 .left{flex:0 0 400px;display:flex;flex-direction:column;gap:10px}
 .right{flex:1;display:flex;flex-direction:column;min-width:0}
-.card{background:#fff;border:1px solid #ddd;border-radius:8px;padding:15px}
-.card h3{margin:0 0 10px 0;font-size:16px;color:#333}
-textarea{width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-family:inherit;resize:vertical}
+.card{background:var(--card-bg);border:1px solid var(--card-border);border-radius:8px;padding:15px}
+.card h3{margin:0 0 10px 0;font-size:16px;color:var(--fg)}
+textarea{width:100%;padding:8px;border:1px solid var(--input-border);border-radius:4px;font-family:inherit;resize:vertical;background:var(--input-bg);color:var(--fg)}
 button{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;font-weight:500}
 button:disabled{opacity:0.5;cursor:not-allowed}
 .btn-primary{background:#2196f3;color:#fff}
@@ -19,50 +31,54 @@ button:disabled{opacity:0.5;cursor:not-allowed}
 .btn-warning{background:#ff9800;color:#fff}
 button:hover:not(:disabled){opacity:0.9}
 .btn-group{display:flex;gap:8px}
-.tabs{display:flex;border-bottom:2px solid #e0e0e0;margin-bottom:10px}
-.tab{padding:10px 20px;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;font-weight:500;color:#666}
-.tab.active{color:#2196f3;border-bottom-color:#2196f3}
+.tabs{display:flex;border-bottom:2px solid var(--grid-border);margin-bottom:10px}
+.tab{padding:10px 20px;cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;font-weight:500;color:var(--tab-inactive)}
+.tab.active{color:var(--tab-active);border-bottom-color:var(--tab-active)}
 .tab-content{display:none;flex:1;overflow:auto}
 .tab-content.active{display:flex;flex-direction:column}
-.status{padding:10px;margin:10px 0;border-radius:4px;background:#f5f5f5;border-left:3px solid #2196f3}
-.task{padding:12px;margin:8px 0;border:1px solid #ddd;border-radius:6px;border-left:4px solid #ccc;cursor:pointer;transition:all 0.2s}
-.task:hover{background:#f9f9f9;transform:translateX(2px)}
+.status{padding:10px;margin:10px 0;border-radius:4px;background:var(--status-bg);border-left:3px solid #2196f3}
+.task{padding:12px;margin:8px 0;border:1px solid var(--card-border);border-radius:6px;border-left:4px solid #ccc;cursor:pointer;transition:all 0.2s;background:var(--task-bg)}
+.task:hover{background:var(--hover-bg);transform:translateX(2px)}
 .task.working{border-left-color:#ff9800}
 .task.completed{border-left-color:#4caf50}
 .task.failed{border-left-color:#f44336}
 .task.planning{border-left-color:#2196f3}
 .task-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-.badge{padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;text-transform:uppercase}
+.badge{padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;text-transform:uppercase;background:var(--badge-bg)}
 .node{margin-left:30px;border-left-color:#999}
 .controls{display:flex;gap:5px;margin-top:8px}
 .controls button{padding:4px 10px;font-size:12px}
 .file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
-.file-card{padding:20px;border:2px solid #e0e0e0;border-radius:8px;text-align:center;cursor:pointer;transition:all 0.2s}
+.file-card{padding:20px;border:2px solid var(--grid-border);border-radius:8px;text-align:center;cursor:pointer;transition:all 0.2s;background:var(--card-bg)}
 .file-card:hover{border-color:#2196f3;transform:translateY(-2px);box-shadow:0 4px 8px rgba(0,0,0,0.1)}
 .file-card.dir{background:#e3f2fd}
 .file-card.file{background:#fff3e0}
+body.dark .file-card.dir{background:#1e3a5f}
+body.dark .file-card.file{background:#3d2f1f}
 .icon{font-size:36px;margin-bottom:8px}
 .terminal{background:#000;color:#0f0;font-family:'Courier New',monospace;padding:15px;border-radius:6px;white-space:pre-wrap;overflow:auto;flex:1}
-input[type=text]{padding:8px;border:1px solid #ccc;border-radius:4px}
+input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--fg)}
 .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
-.edit-mode{background:#fff8e1;border:2px solid #ffc107;padding:10px;border-radius:6px}
 .field{margin-bottom:12px}
-.field label{display:block;font-weight:600;margin-bottom:4px;color:#555}
+.field label{display:block;font-weight:600;margin-bottom:4px;color:var(--fg)}
 .field textarea{min-height:50px}
 .field.description textarea{min-height:80px}
-.viewer{background:#f5f5f5;padding:15px;border-radius:6px;margin-top:10px}
-.viewer pre{background:#fff;padding:15px;border-radius:4px;overflow-x:auto;margin:10px 0;border:1px solid #ddd}
+.viewer{background:var(--status-bg);padding:15px;border-radius:6px;margin-top:10px}
+.viewer pre{background:var(--card-bg);padding:15px;border-radius:4px;overflow-x:auto;margin:10px 0;border:1px solid var(--card-border);color:var(--fg)}
+.theme-toggle{position:fixed;top:20px;right:20px;z-index:1000;background:var(--card-bg);border:1px solid var(--card-border);border-radius:50%;width:50px;height:50px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:24px;box-shadow:0 2px 8px rgba(0,0,0,0.2)}
+.theme-toggle:hover{transform:scale(1.1)}
 </style>
 </head>
 <body>
+<div class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark Mode">🌓</div>
 <div class="container">
   <div class="left">
     <div class="card">
       <h3>📝 Task Input</h3>
-      <textarea id="input" rows="6" placeholder="Example: Perform recon on domain example.com&#10;&#10;Press Enter or click Start to translate and execute"></textarea>
+      <textarea id="input" rows="6" placeholder="Example: Perform recon on domain example.com&#10;&#10;Press Enter or click Start to begin"></textarea>
       <div class="btn-group" style="margin-top:10px">
-        <button class="btn-success" id="startBtn" onclick="start()">▶️ Start</button>
-        <button class="btn-danger" onclick="reset()">🔄 Reset</button>
+        <button class="btn-success" id="startBtn" onclick="handleStart()">▶️ Start</button>
+        <button class="btn-danger" onclick="handleReset()">🔄 Reset</button>
       </div>
     </div>
     
@@ -70,19 +86,19 @@ input[type=text]{padding:8px;border:1px solid #ccc;border-radius:4px}
       <h3>✏️ Task Configuration</h3>
       <div class="field">
         <label>Abstract</label>
-        <textarea id="abstract" readonly></textarea>
+        <textarea id="abstract" readonly style="background:#f0f0f0"></textarea>
       </div>
       <div class="field description">
         <label>Description</label>
-        <textarea id="description" readonly></textarea>
+        <textarea id="description" readonly style="background:#f0f0f0"></textarea>
       </div>
       <div class="field">
         <label>Verification</label>
-        <textarea id="verification" readonly></textarea>
+        <textarea id="verification" readonly style="background:#f0f0f0"></textarea>
       </div>
       <div class="btn-group" id="editBtns" style="display:none">
-        <button class="btn-success" onclick="save()">💾 Save</button>
-        <button class="btn-warning" onclick="cancel()">✖ Cancel</button>
+        <button class="btn-success" onclick="handleSave()">💾 Save</button>
+        <button class="btn-warning" onclick="handleCancel()">✖ Cancel</button>
       </div>
     </div>
     
@@ -91,11 +107,11 @@ input[type=text]{padding:8px;border:1px solid #ccc;border-radius:4px}
   
   <div class="right card">
     <div class="tabs">
-      <div class="tab active" onclick="switchTab('tasks')">📋 Tasks</div>
-      <div class="tab" onclick="switchTab('graph')">🌳 Graph</div>
-      <div class="tab" onclick="switchTab('terminal')">💻 Terminal</div>
-      <div class="tab" onclick="switchTab('llm')">🤖 LLM</div>
-      <div class="tab" onclick="switchTab('files')">📁 Files</div>
+      <div class="tab active" onclick="switchTab(event,'tasks')">📋 Tasks</div>
+      <div class="tab" onclick="switchTab(event,'graph')">🌳 Graph</div>
+      <div class="tab" onclick="switchTab(event,'terminal')">💻 Terminal</div>
+      <div class="tab" onclick="switchTab(event,'llm')">🤖 LLM</div>
+      <div class="tab" onclick="switchTab(event,'files')">📁 Files</div>
     </div>
     
     <div id="tasks" class="tab-content active">
@@ -148,45 +164,85 @@ input[type=text]{padding:8px;border:1px solid #ccc;border-radius:4px}
 <script>
 mermaid.initialize({startOnLoad:false,theme:'default'});
 
-let task=null,orig=null,editing=false,curPath='/app/work',curTask=null,translated=false;
+// Global state
+let task=null,orig=null,editing=false,curPath='/app/work',curTask=null;
 let intervals={graph:null,term:null,llm:null,poll:null};
 let auto={graph:false,term:false,llm:false};
 
-function msg(t,c='#2196f3'){status.innerHTML=t;status.style.borderLeftColor=c}
+function msg(t,c='#2196f3'){
+  status.innerHTML=t;
+  status.style.borderLeftColor=c;
+}
 
-// Enter key handler
-input.addEventListener('keydown',e=>{
-  if(e.key==='Enter'&&!e.shiftKey){
-    e.preventDefault();
-    start();
-  }
+// Enter key to start
+document.addEventListener('DOMContentLoaded',()=>{
+  input.addEventListener('keydown',e=>{
+    if(e.key==='Enter'&&!e.shiftKey){
+      e.preventDefault();
+      handleStart();
+    }
+  });
+  loadTasks();
 });
 
-async function start(){
-  // Step 1: If no task yet, translate first
+// Main start function - handles both translate and execute
+async function handleStart(){
+  console.log('handleStart called, task=', task);
+  
+  // Step 1: Translate if no task exists
   if(!task){
     const txt=input.value.trim();
-    if(!txt)return msg('⚠ Enter a task description','#ff9800');
+    if(!txt){
+      msg('⚠ Enter a task description','#ff9800');
+      return;
+    }
+    
     msg('🔄 Translating task...');
     startBtn.disabled=true;
+    
     try{
-      const r=await fetch('/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request:txt})});
+      console.log('Calling /translate with:', txt);
+      const r=await fetch('/translate',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({request:txt})
+      });
       const d=await r.json();
+      console.log('Translation response:', d);
+      
       if(d.error){
         startBtn.disabled=false;
-        return msg('❌ '+d.error,'#f44336');
+        msg('❌ '+d.error,'#f44336');
+        return;
       }
-      task=orig=d.translated_task;
+      
+      task=d.translated_task;
+      orig={...task};
       abstract.value=task.abstract;
       description.value=task.description;
       verification.value=task.verification;
       taskCard.style.display='block';
-      translated=true;
       startBtn.disabled=false;
       startBtn.innerHTML='▶️ Execute Task';
-      msg('✅ Task translated! Click Start again to execute, or edit fields first','#4caf50');
-      [abstract,description,verification].forEach(e=>e.onclick=()=>edit());
+      msg('✅ Task translated! Click Start again to execute, or click fields to edit','#4caf50');
+      
+      // Make fields editable on click
+      [abstract,description,verification].forEach(e=>{
+        e.onclick=()=>{
+          if(!editing){
+            editing=true;
+            [abstract,description,verification].forEach(f=>{
+              f.readonly=false;
+              f.style.background='#fff';
+            });
+            editBtns.style.display='flex';
+            startBtn.disabled=true;
+          }
+        };
+      });
+      
     }catch(e){
+      console.error('Translation error:', e);
       startBtn.disabled=false;
       msg('❌ '+e.message,'#f44336');
     }
@@ -194,63 +250,85 @@ async function start(){
   }
   
   // Step 2: Execute the task
-  if(editing)return msg('⚠ Save changes first','#ff9800');
+  if(editing){
+    msg('⚠ Save changes first','#ff9800');
+    return;
+  }
+  
   msg('⏳ Creating task...');
   startBtn.disabled=true;
+  
   try{
-    const r=await fetch('/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({translated_task:task})});
+    console.log('Creating task with:', task);
+    const r=await fetch('/task',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({translated_task:task})
+    });
     const d=await r.json();
+    console.log('Task creation response:', d);
+    
     if(d.error){
       startBtn.disabled=false;
-      return msg('❌ '+d.error,'#f44336');
+      msg('❌ '+d.error,'#f44336');
+      return;
     }
+    
     curTask=d.task_id;
     graphId.value=termId.value=llmId.value=curTask;
     msg('✅ Task '+curTask+' running','#4caf50');
-    switchTab('terminal');
+    switchTab({target:document.querySelectorAll('.tab')[2]},'terminal');
     startAuto();
     loadTasks();
+    
   }catch(e){
+    console.error('Task creation error:', e);
     startBtn.disabled=false;
     msg('❌ '+e.message,'#f44336');
   }
 }
 
-function edit(){
-  if(editing)return;
-  editing=true;
-  [abstract,description,verification].forEach(e=>{e.readonly=false;e.style.background='#fff'});
-  editBtns.style.display='flex';
-  startBtn.innerHTML='▶️ Execute Task';
-  startBtn.disabled=true;
-}
-
-function save(){
-  task={abstract:abstract.value.trim(),description:description.value.trim(),verification:verification.value.trim()};
+function handleSave(){
+  task={
+    abstract:abstract.value.trim(),
+    description:description.value.trim(),
+    verification:verification.value.trim()
+  };
   orig={...task};
   editing=false;
-  [abstract,description,verification].forEach(e=>{e.readonly=true;e.style.background='#f0f0f0'});
+  [abstract,description,verification].forEach(e=>{
+    e.readonly=true;
+    e.style.background='#f0f0f0';
+  });
   editBtns.style.display='none';
   startBtn.disabled=false;
-  msg('💾 Saved!','#4caf50');
+  msg('💾 Changes saved!','#4caf50');
 }
 
-function cancel(){
+function handleCancel(){
   abstract.value=orig.abstract;
   description.value=orig.description;
   verification.value=orig.verification;
   task={...orig};
   editing=false;
-  [abstract,description,verification].forEach(e=>{e.readonly=true;e.style.background='#f0f0f0'});
+  [abstract,description,verification].forEach(e=>{
+    e.readonly=true;
+    e.style.background='#f0f0f0';
+  });
   editBtns.style.display='none';
   startBtn.disabled=false;
-  msg('❌ Cancelled');
+  msg('❌ Changes cancelled');
 }
 
-function reset(){
+function handleReset(){
   Object.values(intervals).forEach(i=>i&&clearInterval(i));
-  task=orig=null;editing=false;curTask=null;translated=false;
-  input.value=abstract.value=description.value=verification.value='';
+  task=orig=null;
+  editing=false;
+  curTask=null;
+  input.value='';
+  abstract.value='';
+  description.value='';
+  verification.value='';
   taskCard.style.display='none';
   startBtn.disabled=false;
   startBtn.innerHTML='▶️ Start';
@@ -258,10 +336,10 @@ function reset(){
   fetch('/reset',{method:'POST'});
 }
 
-function switchTab(name){
+function switchTab(e,name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-  event.target.classList.add('active');
+  e.target.classList.add('active');
   document.getElementById(name).classList.add('active');
   if(name==='files')loadFiles(curPath);
   else if(name==='tasks')loadTasks();
@@ -296,7 +374,8 @@ async function loadTasks(){
 async function viewTask(id){
   graphId.value=termId.value=llmId.value=id;
   await loadGraph();
-  switchTab('graph');
+  const tabs=document.querySelectorAll('.tab');
+  switchTab({target:tabs[1]},'graph');
 }
 
 async function viewNode(id,e){
@@ -348,7 +427,7 @@ async function loadTerm(){
   try{
     const r=await fetch('/task/'+id);
     const d=await r.json();
-    termView.textContent=d.error?d.error:d.terminal_output.length?d.terminal_output.join('\n'):'No output yet';
+    termView.textContent=d.error?d.error:d.terminal_output&&d.terminal_output.length?d.terminal_output.join('\n'):'No output yet';
     termView.scrollTop=termView.scrollHeight;
   }catch(e){termView.textContent=e.message}
 }
@@ -359,7 +438,7 @@ async function loadLLM(){
   try{
     const r=await fetch('/task/'+id);
     const d=await r.json();
-    llmView.textContent=d.error?d.error:d.llm_responses.length?d.llm_responses.map((x,i)=>'['+(i+1)+'] '+x).join('\n\n'+'='.repeat(80)+'\n\n'):'No responses yet';
+    llmView.textContent=d.error?d.error:d.llm_responses&&d.llm_responses.length?d.llm_responses.map((x,i)=>'['+(i+1)+'] '+x).join('\n\n'+'='.repeat(80)+'\n\n'):'No responses yet';
     llmView.scrollTop=llmView.scrollHeight;
   }catch(e){llmView.textContent=e.message}
 }
@@ -391,7 +470,7 @@ function startAuto(){
     try{
       const r=await fetch('/task/'+curTask);
       const d=await r.json();
-      if(['completed','failed','cancelled'].includes(d.status)){
+      if(['completed','failed','cancelled','impossible'].includes(d.status)){
         Object.values(intervals).forEach(i=>i&&clearInterval(i));
         loadTerm();loadLLM();loadGraph();loadTasks();
         msg('✅ Task '+d.status,d.status==='completed'?'#4caf50':'#f44336');
@@ -443,9 +522,6 @@ function copyFile(){
 }
 
 function esc(t){const d=document.createElement('div');d.textContent=t;return d.innerHTML}
-
-window.onload=()=>loadTasks();
-window.onbeforeunload=()=>Object.values(intervals).forEach(i=>i&&clearInterval(i));
 </script>
 </body>
 </html>

@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
+"""
+app.py - Main Flask application with task translation
+"""
 import os
 import re
 import docker
 import requests
-from flask import Flask, request, render_template_string, jsonify, session, send_file
+from flask import Flask, request, render_template_string, jsonify, session
 from flask_session import Session
 import datetime
 import json
-import base64
-import threading
-import time
-import shutil
+
+# Import the task translator
+from src.task_translator import create_translator, TaskModel
 
 app = Flask(__name__)
 app.config["SESSION_PERMANENT"] = False
@@ -20,13 +22,13 @@ Session(app)
 LLM_URL = os.getenv("LLM_BASE_URL", "https://api.moonshot.ai/v1") + "/chat/completions"
 LLM_KEY = os.getenv("MOONSHOT_API_KEY")
 KALI_NAME = "kali-llm-web-kali-1"
-WORK_DIR = "/app"  # Main working directory
-TASK_DIR = "/app/work"  # Directory for task-specific files (shared with host)
-LOG_DIR = "/app/logs"  # Dedicated directory for logs (shared with host)
-SHARED_DIR = "/shared"  # Additional shared directory
+WORK_DIR = "/app"
+TASK_DIR = "/app/work"
+LOG_DIR = "/app/logs"
+SHARED_DIR = "/shared"
 
 # Auto-continue configuration
-AUTO_CONTINUE_DELAY = int(os.getenv("AUTO_CONTINUE_DELAY", "10"))  # Default 10 seconds
+AUTO_CONTINUE_DELAY = int(os.getenv("AUTO_CONTINUE_DELAY", "10"))
 
 # Ensure directories exist
 os.makedirs(TASK_DIR, exist_ok=True)
@@ -36,6 +38,14 @@ os.makedirs(SHARED_DIR, exist_ok=True)
 INSTALL_LOG = os.path.join(LOG_DIR, "install.log")
 ACTION_LOG = os.path.join(LOG_DIR, "actions.log")
 LLM_RESPONSE_LOG = os.path.join(LOG_DIR, "llm_response.log")
+TRANSLATION_LOG = os.path.join(LOG_DIR, "translation.log")
+
+# Initialize task translator
+try:
+    task_translator = create_translator()
+except Exception as e:
+    print(f"Warning: Task translator initialization failed: {e}")
+    task_translator = None
 
 def log_action(action, output):
     """Log all actions and their outputs to a file"""
@@ -49,6 +59,13 @@ def log_llm_response(response):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"[{timestamp}] LLM Response:\n{response}\n{'='*50}\n"
     with open(LLM_RESPONSE_LOG, 'a') as f:
+        f.write(log_entry)
+
+def log_translation(user_request, translated_task):
+    """Log task translations to a file"""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] Translation:\nUser Request: {user_request}\nTranslated Task:\n{json.dumps(translated_task, indent=2)}\n{'='*50}\n"
+    with open(TRANSLATION_LOG, 'a') as f:
         f.write(log_entry)
 
 def get_install_log():
@@ -65,73 +82,86 @@ def update_install_log(tool_name):
     with open(INSTALL_LOG, 'a') as f:
         f.write(log_entry)
 
-def get_system_prompt():
-    """Generate system prompt with installation history"""
+def get_system_prompt(task: TaskModel):
+    """Generate system prompt with task context and installation history"""
     history = get_install_log()
-    return (
-        "You are an expert penetration tester and security analyst working inside a Kali Linux Docker container. "
-        "You have full access to security tools and can install additional tools as needed.\n\n"
-        "CRITICAL OUTPUT FORMAT:\n"
-        "- Your response must be ONLY a bash command or 'DONE: summary'\n"
-        "- NO explanations, NO markdown formatting, NO code blocks\n"
-        "- Just the raw command to execute\n"
-        "- Example GOOD responses: 'nmap -p- 192.168.1.1' or 'DONE: Scan completed'\n"
-        "- Example BAD responses: 'Let me scan the host: nmap ...' or '```bash\\nnmap ...\\n```'\n\n"
-        "CRITICAL INSTRUCTIONS:\n"
-        "- Execute ONLY ONE command at a time\n"
-        "- WAIT for the output of each command before proceeding\n"
-        "- After seeing the output, decide what to do next\n"
-        "- Do not provide multiple commands at once\n"
-        "- Do not create multi-step plans in advance\n"
-        "- Focus on the immediate next step only\n\n"
-        "Your environment:\n"
-        "- You are running inside a Kali Linux Docker container\n"
-        "- You can execute commands one by one and wait for output before proceeding\n"
-        "- You can write files to /app/work directory\n"
-        "- You can view files using commands like 'cat', 'less', 'more', etc.\n"
-        "- You can append content to files using '>>' redirection\n"
-        "- All files should be saved in /app/work directory\n\n"
-        "Your approach:\n"
-        "- Analyze the user's request thoroughly\n"
-        "- Decide on only the FIRST step to take\n"
-        "- Execute one command for that step\n"
-        "- Wait for the output\n"
-        "- Based on the output, decide the next step\n"
-        "- Continue this process until the task is complete\n\n"
-        "Guidelines:\n"
-        "- Always use /app/work for storing files (create it if needed)\n"
-        "- When you need to install a tool, use: apt update && apt install -y toolname\n"
-        "- Issue ONLY ONE command at a time\n"
-        "- You can create multiple files (reports, scripts, notes) in /app/work\n"
-        "- To view files, use commands like 'cat filename', 'less filename', etc.\n"
-        "- To append content to files, use 'echo \"content\" >> filename'\n"
-        "- When you believe the task is complete, respond with 'DONE: [summary]'\n\n"
-        f"Installation history:\n{history}\n\n"
-        "REMEMBER: Respond with ONLY the command, nothing else. No explanations, no markdown, just the command."
-    )
+    return f"""You are an expert penetration tester and security analyst working inside a Kali Linux Docker container.
+You have full access to security tools and can install additional tools as needed.
+
+TASK CONTEXT:
+Abstract: {task.abstract}
+
+Detailed Description:
+{task.description}
+
+Verification Criteria:
+{task.verification}
+
+CRITICAL OUTPUT FORMAT:
+- Your response must be ONLY a bash command or 'DONE: summary'
+- NO explanations, NO markdown formatting, NO code blocks
+- Just the raw command to execute
+- Example GOOD responses: 'nmap -p- 192.168.1.1' or 'DONE: Scan completed'
+- Example BAD responses: 'Let me scan the host: nmap ...' or '```bash\\nnmap ...\\n```'
+
+CRITICAL INSTRUCTIONS:
+- Execute ONLY ONE command at a time
+- WAIT for the output of each command before proceeding
+- After seeing the output, decide what to do next
+- Do not provide multiple commands at once
+- Do not create multi-step plans in advance
+- Focus on the immediate next step only
+- Work towards completing the task as described above
+
+Your environment:
+- You are running inside a Kali Linux Docker container
+- You can execute commands one by one and wait for output before proceeding
+- You can write files to /app/work directory
+- You can view files using commands like 'cat', 'less', 'more', etc.
+- You can append content to files using '>>' redirection
+- All files should be saved in /app/work directory
+
+Your approach:
+- Follow the task description as your guide
+- Decide on only the FIRST step to take
+- Execute one command for that step
+- Wait for the output
+- Based on the output, decide the next step
+- Continue until all verification criteria are met
+
+Guidelines:
+- Always use /app/work for storing files (create it if needed)
+- When you need to install a tool, use: apt update && apt install -y toolname
+- Issue ONLY ONE command at a time
+- You can create multiple files (reports, scripts, notes) in /app/work
+- To view files, use commands like 'cat filename', 'less filename', etc.
+- To append content to files, use 'echo "content" >> filename'
+- When all verification criteria are met, respond with 'DONE: [summary]'
+- In your DONE summary, reference the verification criteria and confirm they are met
+
+Installation history:
+{history}
+
+REMEMBER: Respond with ONLY the command, nothing else. No explanations, no markdown, just the command."""
 
 def extract_command(response: str) -> str:
     """Extract the actual command from LLM response, removing markdown and explanations"""
     response = response.strip()
     
-    # Check if it's a DONE status
     if response.startswith("DONE:"):
         return response
     
     # Remove markdown code blocks
-    # Pattern: ```bash\ncommand\n``` or ```\ncommand\n```
     code_block_pattern = r'```(?:bash|sh)?\s*\n(.*?)\n```'
     matches = re.findall(code_block_pattern, response, re.DOTALL)
     if matches:
-        # Return the first code block content
         return matches[0].strip()
     
-    # Remove any leading explanatory text (lines that don't look like commands)
+    # Remove any leading explanatory text
     lines = response.split('\n')
     command_lines = []
     for line in lines:
         line = line.strip()
-        # Skip empty lines and common explanatory phrases
         if not line:
             continue
         if any(phrase in line.lower() for phrase in [
@@ -139,13 +169,11 @@ def extract_command(response: str) -> str:
             'now,', 'i apologize', 'i see', 'i notice', 'sorry'
         ]):
             continue
-        # This looks like a command line
         command_lines.append(line)
     
     if command_lines:
         return command_lines[0]
     
-    # If all else fails, return the original response
     return response
 
 def llm_next_command(conversation_history: list) -> str:
@@ -159,13 +187,8 @@ def llm_next_command(conversation_history: list) -> str:
     r.raise_for_status()
     response = r.json()["choices"][0]["message"]["content"].strip()
     
-    # Log the raw LLM response
     log_llm_response(f"RAW: {response}")
-    
-    # Extract the actual command
     command = extract_command(response)
-    
-    # Log the extracted command
     log_llm_response(f"EXTRACTED: {command}")
     
     return command
@@ -174,7 +197,6 @@ def kali_exec(cmd: str) -> tuple[str, bool]:
     """Execute command and return (output, tool_installed)"""
     c = docker.from_env().containers.get(KALI_NAME)
     
-    # Execute the command
     raw = c.exec_run(["/bin/bash", "-c", cmd], tty=False, stderr=True, stdout=True)
     output = raw.output.decode(errors="ignore")
     tool_installed = False
@@ -187,24 +209,19 @@ def kali_exec(cmd: str) -> tuple[str, bool]:
             install_cmd = f"apt-get update && apt-get install -y {missing_tool}"
             c.exec_run(["/bin/bash", "-c", install_cmd], tty=False, stderr=True, stdout=True)
             
-            # Update install log
             update_install_log(missing_tool)
             tool_installed = True
             
-            # Retry the original command after installation
             raw = c.exec_run(["/bin/bash", "-c", cmd], tty=False, stderr=True, stdout=True)
             output = f"[System] Tool '{missing_tool}' was not found. Automatically installed it.\n\n" + raw.output.decode(errors="ignore")
     
-    # Log the action
     log_action(cmd, output)
-    
     return output, tool_installed
 
 def list_directory(path):
     """List the contents of a directory"""
     c = docker.from_env().containers.get(KALI_NAME)
     
-    # Ensure path exists
     check_cmd = f"test -d {path} && echo 'DIR' || echo 'NOT_DIR'"
     raw = c.exec_run(["/bin/bash", "-c", check_cmd], tty=False, stderr=True, stdout=True)
     result = raw.output.decode(errors="ignore").strip()
@@ -212,12 +229,10 @@ def list_directory(path):
     if result != "DIR":
         return []
     
-    # List directory contents with details
     raw = c.exec_run(["/bin/bash", "-c", f"cd {path} && ls -la"], tty=False, stderr=True, stdout=True)
     output = raw.output.decode(errors="ignore")
     
-    # Parse the output to get file/directory list
-    lines = output.strip().split('\n')[1:]  # Skip the first line (total)
+    lines = output.strip().split('\n')[1:]
     files = []
     
     for line in lines:
@@ -228,10 +243,10 @@ def list_directory(path):
         if len(parts) < 9:
             continue
             
-        file_type = parts[0][0]  # First character indicates file type
+        file_type = parts[0][0]
         permissions = parts[0]
         size = parts[4]
-        name = ' '.join(parts[8:])  # Handle filenames with spaces
+        name = ' '.join(parts[8:])
         
         files.append({
             'name': name,
@@ -247,7 +262,6 @@ def get_file_content(path):
     """Get the content of a file"""
     c = docker.from_env().containers.get(KALI_NAME)
     
-    # Check if it's a file
     check_cmd = f"test -f {path} && echo 'FILE' || echo 'NOT_FILE'"
     raw = c.exec_run(["/bin/bash", "-c", check_cmd], tty=False, stderr=True, stdout=True)
     result = raw.output.decode(errors="ignore").strip()
@@ -255,7 +269,6 @@ def get_file_content(path):
     if result != "FILE":
         return None, "Not a file"
     
-    # Get file content
     raw = c.exec_run(["/bin/bash", "-c", f"cat {path}"], tty=False, stderr=True, stdout=True)
     content = raw.output.decode(errors="ignore")
     
@@ -266,20 +279,63 @@ def index():
     with open("templates/index.html") as f:
         return render_template_string(f.read())
 
+@app.route("/translate", methods=["POST"])
+def translate():
+    """Translate user request into structured task"""
+    try:
+        data = request.json
+        user_request = data.get("request", "").strip()
+        
+        if not user_request:
+            return jsonify({"error": "Request cannot be empty"}), 400
+        
+        if not task_translator:
+            return jsonify({"error": "Task translator not initialized"}), 500
+        
+        # Translate the task
+        translated_task = task_translator.translate_task(user_request)
+        
+        # Convert to dict for JSON response
+        task_dict = translated_task.model_dump()
+        
+        # Log the translation
+        log_translation(user_request, task_dict)
+        
+        return jsonify({
+            "translated_task": task_dict,
+            "original_request": user_request
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/run", methods=["POST"])
 def run():
     try:
         data = request.json
         ask = data.get("ask", "").strip()
         is_continue = data.get("continue", False)
+        translated_task = data.get("translated_task")
         
         # Initialize or get the conversation history
         if "conversation" not in session or not is_continue:
-            # Start new conversation
+            # Validate that we have a translated task
+            if not translated_task:
+                return jsonify({"error": "Translated task is required for new conversations"}), 400
+            
+            # Convert dict to TaskModel
+            try:
+                task = TaskModel(**translated_task)
+            except Exception as e:
+                return jsonify({"error": f"Invalid task structure: {e}"}), 400
+            
+            # Start new conversation with task context
             session["conversation"] = [
-                {"role": "system", "content": get_system_prompt()},
-                {"role": "user", "content": ask}
+                {"role": "system", "content": get_system_prompt(task)},
+                {"role": "user", "content": f"Begin working on this task: {task.abstract}"}
             ]
+            session["current_task"] = translated_task
+            
             # Get the first command from LLM
             cmd = llm_next_command(session["conversation"])
             session["conversation"].append({"role": "assistant", "content": cmd})
@@ -312,14 +368,16 @@ def run():
             "llm_response": next_action,
             "done": is_done,
             "summary": next_action[5:].strip() if is_done else None,
-            "auto_continue": not is_done,  # Auto-continue unless done
-            "auto_continue_delay": AUTO_CONTINUE_DELAY
+            "auto_continue": not is_done,
+            "auto_continue_delay": AUTO_CONTINUE_DELAY,
+            "current_task": session.get("current_task")
         }
         
         # Clear conversation if done
         if is_done:
             session.pop("conversation", None)
             session.pop("last_cmd", None)
+            session.pop("current_task", None)
         
         return jsonify(response)
         
@@ -330,6 +388,7 @@ def run():
 def reset():
     session.pop("conversation", None)
     session.pop("last_cmd", None)
+    session.pop("current_task", None)
     return jsonify({"status": "Conversation reset"})
 
 @app.route("/config", methods=["GET", "POST"])
@@ -355,8 +414,6 @@ def get_files():
     try:
         path = request.args.get('path', '/app')
         files = list_directory(path)
-        
-        # Get parent directory for navigation
         parent = os.path.dirname(path) if path != '/' else None
         
         return jsonify({

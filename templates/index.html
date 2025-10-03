@@ -5,7 +5,7 @@ body{font-family:Arial;margin:1rem;height:95vh}
 .container{display:flex;gap:20px;height:100%}
 .left-column{flex:1;display:flex;flex-direction:column;max-width:400px}
 .right-column{flex:3;display:flex;flex-direction:column}
-textarea{width:100%;height:100%;resize:none;margin-bottom:10px}
+textarea{width:100%;resize:none;margin-bottom:10px}
 button{margin:5px 0;padding:5px 10px;width:100%}
 #status{margin:10px 0;font-weight:bold}
 h2{margin-top:0}
@@ -36,6 +36,14 @@ h2{margin-top:0}
 .config-controls input{padding:5px;width:80px}
 .config-controls button{padding:5px 15px;width:auto}
 .countdown{color:#666;font-size:0.9em;font-style:italic}
+.translation-section{background:#e3f2fd;padding:10px;margin-bottom:10px;border-radius:5px;border:1px solid #2196f3;display:none}
+.translation-section.active{display:block}
+.translation-content{background:#fff;padding:10px;margin-top:10px;border-radius:5px;border:1px solid #ccc;max-height:200px;overflow-y:auto}
+.translation-field{margin-bottom:10px}
+.translation-field strong{display:block;color:#1976d2;margin-bottom:5px}
+.translation-field div{color:#424242;white-space:pre-wrap}
+#askInput{height:120px}
+.workflow-status{background:#f5f5f5;padding:8px;margin:10px 0;border-left:3px solid #2196f3;font-size:0.9em}
 </style>
 <div class="container">
   <div class="left-column">
@@ -48,16 +56,35 @@ h2{margin-top:0}
         <button id="updateConfig" style="width:auto">Update</button>
       </div>
     </div>
+    <div class="translation-section" id="translationSection">
+      <strong>📋 Translated Task</strong>
+      <div class="translation-content" id="translationContent">
+        <div class="translation-field">
+          <strong>Abstract:</strong>
+          <div id="taskAbstract"></div>
+        </div>
+        <div class="translation-field">
+          <strong>Description:</strong>
+          <div id="taskDescription"></div>
+        </div>
+        <div class="translation-field">
+          <strong>Verification:</strong>
+          <div id="taskVerification"></div>
+        </div>
+      </div>
+    </div>
     <div class="input-container">
       <form id="form">
         <label>What do you want to accomplish?</label><br>
-        <textarea id="ask" placeholder="Example:&#10;1. Get HTTP headers of bcr.ro&#10;2. Save results to work directory"></textarea><br>
+        <textarea id="askInput" placeholder="Example:&#10;1. Perform passive recon on domain example.com&#10;2. Scan a web application for vulnerabilities&#10;3. Enumerate SMB shares on 192.168.1.0/24"></textarea><br>
         <div class="controls-container">
-          <button type="submit" id="startBtn">Start</button>
+          <button type="button" id="translateBtn">Translate Task</button>
+          <button type="submit" id="startBtn" disabled>Start Execution</button>
           <button type="button" id="continue" style="display:none">Continue</button>
           <button type="button" id="reset">Reset</button>
         </div>
       </form>
+      <div class="workflow-status" id="workflowStatus" style="display:none"></div>
       <div id="status"></div>
     </div>
   </div>
@@ -95,17 +122,24 @@ const form=document.getElementById('form');
 const startBtn=document.getElementById('startBtn');
 const continueBtn=document.getElementById('continue');
 const resetBtn=document.getElementById('reset');
-const ask=document.getElementById('ask');
 const currentPath=document.getElementById('currentPath');
 const parentDirBtn=document.getElementById('parentDirBtn');
 const sharedInfo=document.getElementById('sharedInfo');
 const delayInput=document.getElementById('delayInput');
 const updateConfig=document.getElementById('updateConfig');
+const askInput=document.getElementById('askInput');
+const translateBtn=document.getElementById('translateBtn');
+const translationSection=document.getElementById('translationSection');
+const taskAbstract=document.getElementById('taskAbstract');
+const taskDescription=document.getElementById('taskDescription');
+const taskVerification=document.getElementById('taskVerification');
+const workflowStatus=document.getElementById('workflowStatus');
 
 let currentDirPath = '/app';
 let autoContDelay = 10;
 let countdownTimer = null;
 let countdownSeconds = 0;
+let translatedTask = null;
 
 // Load configuration on startup
 async function loadConfig(){
@@ -158,16 +192,29 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 // Enter key support
-ask.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
+askInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.ctrlKey) {
     e.preventDefault();
-    startTask();
+    if(translatedTask){
+      startTask();
+    } else {
+      translateTask();
+    }
   }
 });
 
+// Translate button handler
+translateBtn.onclick=async()=>{
+  await translateTask();
+};
+
 form.onsubmit=async(e)=>{
   e.preventDefault();
-  await startTask();
+  if(translatedTask){
+    await startTask();
+  } else {
+    status.textContent='⚠️ Please translate the task first';
+  }
 };
 
 continueBtn.onclick=async()=>{
@@ -181,8 +228,12 @@ resetBtn.onclick=async()=>{
   terminal.textContent='';
   llm_response.textContent='';
   status.textContent='Session reset. Ready for new task.';
+  workflowStatus.style.display='none';
   continueBtn.style.display='none';
-  startBtn.disabled = false;
+  startBtn.disabled = true;
+  translatedTask = null;
+  translationSection.classList.remove('active');
+  translateBtn.disabled = false;
 };
 
 parentDirBtn.onclick=async()=>{
@@ -217,6 +268,55 @@ function startCountdown(seconds, callback){
   countdownTimer=setInterval(updateStatus, 1000);
 }
 
+async function translateTask(){
+  const userRequest=askInput.value.trim();
+  if(!userRequest) {
+    status.textContent='⚠️ Please enter a task description';
+    return;
+  }
+  
+  translateBtn.disabled = true;
+  status.textContent='🔄 Translating task...';
+  workflowStatus.style.display='block';
+  workflowStatus.textContent='Step 1/2: Translating user request into structured task...';
+  
+  try {
+    const r=await fetch('/translate',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({request:userRequest})
+    });
+    
+    const data=await r.json();
+    
+    if(data.error){
+      status.textContent=`❌ Translation failed: ${data.error}`;
+      workflowStatus.style.display='none';
+      translateBtn.disabled = false;
+      return;
+    }
+    
+    // Store translated task
+    translatedTask = data.translated_task;
+    
+    // Display translated task
+    taskAbstract.textContent = translatedTask.abstract;
+    taskDescription.textContent = translatedTask.description;
+    taskVerification.textContent = translatedTask.verification;
+    translationSection.classList.add('active');
+    
+    // Enable start button
+    startBtn.disabled = false;
+    status.textContent='✅ Task translated successfully! Click "Start Execution" to begin.';
+    workflowStatus.textContent='Step 1/2: ✓ Task translated. Ready for execution.';
+    
+  } catch (e) {
+    status.textContent=`❌ Translation error: ${e.message}`;
+    workflowStatus.style.display='none';
+    translateBtn.disabled = false;
+  }
+}
+
 async function loadSharedInfo(){
   try {
     const r=await fetch('/shared_info');
@@ -246,20 +346,28 @@ async function navigateToDirectory(path){
 }
 
 async function startTask(){
-  const task=ask.value.trim();
-  if(!task) return;
+  if(!translatedTask){
+    status.textContent='⚠️ Please translate the task first';
+    return;
+  }
   
   clearCountdown();
   terminal.textContent='';
   llm_response.textContent='';
   status.textContent='⏳ Processing...';
+  workflowStatus.style.display='block';
+  workflowStatus.textContent='Step 2/2: Executing task...';
   continueBtn.style.display='none';
   startBtn.disabled = true;
+  translateBtn.disabled = true;
   
   const r=await fetch('/run',{
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ask:task})
+    body:JSON.stringify({
+      ask:askInput.value.trim(),
+      translated_task:translatedTask
+    })
   });
   const data=await r.json();
   updateUI(data);
@@ -297,11 +405,15 @@ function updateUI(data){
       llm_response.textContent+=`\n\n✅ Task completed: ${data.summary}`;
     }
     status.textContent='✅ Task completed';
+    workflowStatus.textContent='Step 2/2: ✓ Task execution completed successfully!';
     continueBtn.style.display='none';
-    startBtn.disabled = false;
+    startBtn.disabled = true;
+    translateBtn.disabled = false;
+    translatedTask = null;
   } else {
     const delay=data.auto_continue_delay || autoContDelay;
     continueBtn.style.display='inline-block';
+    workflowStatus.textContent='Step 2/2: Task execution in progress...';
     
     if(data.auto_continue){
       startCountdown(delay, continueTask);
@@ -402,3 +514,5 @@ window.addEventListener('load', () => {
   document.querySelector('.tab[data-tab="terminal"]').click();
 });
 </script>
+</document_content>
+</invoke>

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-app.py - Main Flask application with hierarchical task management and parallel execution
+app.py - Enhanced with node logging endpoints
 """
 import os
 import docker
@@ -300,6 +300,26 @@ def get_task_status(task_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/task/<task_id>/nodes", methods=["GET"])
+def get_task_nodes(task_id):
+    """Get hierarchical list of all nodes for a task"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        nodes = task_manager.get_task_nodes(task_id)
+        
+        print(f"[API] Task {task_id} has {len(nodes)} nodes")
+        
+        return jsonify({"nodes": nodes})
+        
+    except Exception as e:
+        print(f"[API] Error getting task nodes: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/task/<task_id>/stop", methods=["PUT"])
 def cancel_task(task_id):
     """Cancel a running task"""
@@ -365,6 +385,29 @@ def get_node_details(node_id):
         return jsonify(details)
         
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/log", methods=["GET"])
+def get_node_log(node_id):
+    """Get log file content for a specific node"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        log_content = task_manager.get_node_log(node_id)
+        if log_content is None:
+            return jsonify({"error": "Node not found"}), 404
+        
+        return jsonify({
+            "node_id": node_id,
+            "log": log_content
+        })
+        
+    except Exception as e:
+        print(f"[API] Error getting node log: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 

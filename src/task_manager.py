@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-task_manager.py - Enhanced with better logging for multi-level branching
+task_manager.py - Enhanced with per-node file logging and unified root handling
 """
 import os
 import uuid
 from datetime import datetime
-from threading import Thread
-from typing import Dict, Optional
+from threading import Thread, Lock
+from typing import Dict, Optional, List
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
 
 from .task_models import TaskModel, TaskStatus, TaskModelOut, TaskStatusResponse
 from .task_node import TaskNode, TaskImpossibleException
@@ -16,9 +15,67 @@ from .task_relation_manager import TaskRelationManager
 from .mcp_agent import MCPAgent
 
 
+class NodeLogger:
+    """Thread-safe logger that writes to node-specific log files"""
+    
+    def __init__(self, log_dir: str, task_id: str, node_id: str):
+        self.log_path = os.path.join(log_dir, 'nodes', task_id, f'{node_id}.log')
+        os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+        self.lock = Lock()
+        self._initialized = False
+    
+    def _ensure_initialized(self, node_metadata: dict):
+        """Write header section on first call"""
+        if self._initialized:
+            return
+        
+        with self.lock:
+            if self._initialized:  # Double-check
+                return
+            
+            with open(self.log_path, 'w') as f:
+                f.write("=" * 80 + "\n")
+                f.write("NODE METADATA (curl-style JSON)\n")
+                f.write("=" * 80 + "\n")
+                import json
+                f.write(json.dumps(node_metadata, indent=2) + "\n\n")
+                f.write("=" * 80 + "\n")
+                f.write("TERMINAL OUTPUT\n")
+                f.write("=" * 80 + "\n")
+            
+            self._initialized = True
+    
+    def append_terminal(self, content: str):
+        """Append terminal output with timestamp"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            with open(self.log_path, 'a') as f:
+                f.write(f"[{timestamp}] {content}\n")
+    
+    def append_llm(self, content: str):
+        """Append LLM response with timestamp"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            # Add LLM section marker if this is first LLM output
+            with open(self.log_path, 'a') as f:
+                # Check if we need to add LLM section header
+                f.write(f"\n{'=' * 80}\n")
+                f.write("LLM RESPONSES\n")
+                f.write("=" * 80 + "\n")
+                f.write(f"[{timestamp}]\n{content}\n\n")
+    
+    def get_content(self) -> str:
+        """Read entire log file"""
+        try:
+            with open(self.log_path, 'r') as f:
+                return f.read()
+        except FileNotFoundError:
+            return "No log file yet"
+
+
 class TaskManager:
     """
-    Global task manager with support for multi-level hierarchical task execution
+    Global task manager with unified node logging and hierarchical tracking
     """
     
     def __init__(
@@ -34,6 +91,7 @@ class TaskManager:
         self.llm_key = llm_key
         self.model = model
         self.work_dir = work_dir
+        self.log_dir = os.path.join(os.path.dirname(work_dir), 'logs')
         
         # Task storage
         self.tasks: Dict[str, dict] = {}
@@ -41,11 +99,14 @@ class TaskManager:
         self.nodes_lock = Lock()
         self.trms: Dict[str, TaskRelationManager] = {}
         self.trms_lock = Lock()
+        self.loggers: Dict[str, NodeLogger] = {}  # node_id -> logger
+        self.loggers_lock = Lock()
         
         # Thread pool for background execution
         self.executor = ThreadPoolExecutor(max_workers=10)
         
         os.makedirs(work_dir, exist_ok=True)
+        os.makedirs(self.log_dir, exist_ok=True)
     
     def create_task(self, task: TaskModel) -> str:
         """Create new task and spawn background worker"""
@@ -63,8 +124,7 @@ class TaskManager:
             'result': None,
             'error': None,
             'graph_file': os.path.join(self.work_dir, f"{task_id}.mermaid"),
-            'terminal_output': [],
-            'llm_responses': []
+            'root_node_id': None  # Will be set when root node is created
         }
         
         print(f"[TaskManager] Spawning background worker for {task_id}...")
@@ -83,6 +143,16 @@ class TaskManager:
             with open(task_info['graph_file'], 'r') as f:
                 graph_content = f.read()
         
+        # Get root node output if available
+        terminal_output = []
+        llm_responses = []
+        root_node_id = task_info.get('root_node_id')
+        if root_node_id:
+            with self.nodes_lock:
+                if root_node_id in self.nodes:
+                    terminal_output = self.nodes[root_node_id].get('terminal_output', [])
+                    llm_responses = self.nodes[root_node_id].get('llm_responses', [])
+        
         return {
             'task_id': task_id,
             'status': task_info['status'].value if isinstance(task_info['status'], TaskStatus) else task_info['status'],
@@ -94,8 +164,9 @@ class TaskManager:
             'created_at': task_info['created_at'].isoformat(),
             'completed_at': task_info.get('completed_at').isoformat() if task_info.get('completed_at') else None,
             'error': task_info.get('error'),
-            'terminal_output': task_info.get('terminal_output', []),
-            'llm_responses': task_info.get('llm_responses', [])
+            'terminal_output': terminal_output,
+            'llm_responses': llm_responses,
+            'root_node_id': root_node_id
         }
     
     def list_all_tasks(self) -> list:
@@ -108,7 +179,8 @@ class TaskManager:
                 'task_id': task_id,
                 'status': info['status'].value if isinstance(info['status'], TaskStatus) else info['status'],
                 'abstract': info['task_model'].abstract,
-                'created_at': info['created_at'].isoformat()
+                'created_at': info['created_at'].isoformat(),
+                'root_node_id': info.get('root_node_id')
             })
             
             with self.trms_lock:
@@ -128,6 +200,47 @@ class TaskManager:
         
         return result
     
+    def get_task_nodes(self, task_id: str) -> List[dict]:
+        """Get hierarchical list of all nodes for a task"""
+        nodes_list = []
+        
+        with self.trms_lock:
+            if task_id not in self.trms:
+                return nodes_list
+            
+            trm = self.trms[task_id]
+            with trm.lock:
+                # Build tree structure
+                def add_node_recursive(node_id: str, depth: int = 0):
+                    if node_id not in trm.nodes:
+                        return
+                    
+                    node_data = trm.nodes[node_id]
+                    nodes_list.append({
+                        'node_id': node_id,
+                        'abstract': node_data.get('abstract', 'N/A'),
+                        'status': node_data.get('status', 'unknown'),
+                        'depth': depth,
+                        'parent_id': node_data.get('parent_id'),
+                        'children': node_data.get('children', [])
+                    })
+                    
+                    # Add children
+                    for child_id in node_data.get('children', []):
+                        add_node_recursive(child_id, depth + 1)
+                
+                # Find root node
+                root_node_id = None
+                for nid, ndata in trm.nodes.items():
+                    if ndata.get('parent_id') is None:
+                        root_node_id = nid
+                        break
+                
+                if root_node_id:
+                    add_node_recursive(root_node_id)
+        
+        return nodes_list
+    
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task"""
         task_info = self.tasks.get(task_id)
@@ -142,7 +255,7 @@ class TaskManager:
         return False
     
     def register_node(self, task_id: str, node_id: str, node_info: dict):
-        """Register a node for tracking"""
+        """Register a node and create its logger"""
         with self.nodes_lock:
             self.nodes[node_id] = {
                 'task_id': task_id,
@@ -157,6 +270,27 @@ class TaskManager:
                 'error': None,
                 'cancelled': False
             }
+        
+        # Create logger for this node
+        with self.loggers_lock:
+            logger = NodeLogger(self.log_dir, task_id, node_id)
+            self.loggers[node_id] = logger
+            
+            # Initialize log file with metadata
+            metadata = {
+                'node_id': node_id,
+                'task_id': task_id,
+                'abstract': node_info.get('abstract', ''),
+                'parent_id': node_info.get('parent_id'),
+                'status': 'pending',
+                'created_at': datetime.now().isoformat()
+            }
+            logger._ensure_initialized(metadata)
+        
+        # Store root_node_id in task if this is root
+        if node_info.get('parent_id') is None:
+            if task_id in self.tasks:
+                self.tasks[task_id]['root_node_id'] = node_id
     
     def register_trm(self, task_id: str, trm: TaskRelationManager):
         """Register TRM instance"""
@@ -217,14 +351,25 @@ class TaskManager:
         return False
     
     def get_node_output_callback(self, node_id: str):
-        """Get output callback for a node"""
+        """Get output callback for a node - writes to both memory and log file"""
         def callback(output_type, content):
+            # Write to memory
             with self.nodes_lock:
                 if node_id in self.nodes:
                     if output_type == 'terminal':
                         self.nodes[node_id]['terminal_output'].append(content)
                     elif output_type == 'llm':
                         self.nodes[node_id]['llm_responses'].append(content)
+            
+            # Write to log file
+            with self.loggers_lock:
+                if node_id in self.loggers:
+                    logger = self.loggers[node_id]
+                    if output_type == 'terminal':
+                        logger.append_terminal(content)
+                    elif output_type == 'llm':
+                        logger.append_llm(content)
+        
         return callback
     
     def get_node_details(self, node_id: str) -> Optional[dict]:
@@ -246,6 +391,13 @@ class TaskManager:
                 }
         return None
     
+    def get_node_log(self, node_id: str) -> Optional[str]:
+        """Get log file content for a node"""
+        with self.loggers_lock:
+            if node_id in self.loggers:
+                return self.loggers[node_id].get_content()
+        return None
+    
     def get_task_graph(self, task_id: str) -> Optional[str]:
         """Get Mermaid graph for a task"""
         task_info = self.tasks.get(task_id)
@@ -260,9 +412,7 @@ class TaskManager:
         return None
     
     def _run_background_task(self, task_id: str):
-        """
-        Background worker that executes the task tree
-        """
+        """Background worker that executes the task tree"""
         task_info = self.tasks[task_id]
         
         try:
@@ -286,19 +436,14 @@ class TaskManager:
             )
             
             # Create MCP client with output callback
-            def output_callback(output_type, content):
-                if output_type == 'terminal':
-                    task_info['terminal_output'].append(content)
-                elif output_type == 'llm':
-                    task_info['llm_responses'].append(content)
-            
+            # Root node will get its own callback via register_node
             mcp_client = MCPAgent(
                 container_name=self.container_name,
                 llm_url=self.llm_url,
                 llm_key=self.llm_key,
                 model=self.model,
                 log_callback=lambda msg: self._log_message(task_id, msg),
-                output_callback=output_callback,
+                output_callback=None,  # Will be set per node
                 install_log_callback=lambda tool: self._log_install(tool)
             )
             
@@ -361,7 +506,7 @@ class TaskManager:
     
     def _log_install(self, tool_name: str):
         """Log tool installations"""
-        install_log = os.path.join(self.work_dir, "../logs/install.log")
+        install_log = os.path.join(self.log_dir, "install.log")
         os.makedirs(os.path.dirname(install_log), exist_ok=True)
         with open(install_log, 'a') as f:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

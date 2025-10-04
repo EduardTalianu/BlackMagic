@@ -52,6 +52,13 @@ button:hover:not(:disabled){opacity:0.9}
 .terminal{background:#000;color:#0f0;font-family:'Courier New',monospace;padding:15px;border-radius:6px;white-space:pre-wrap;overflow:auto;flex:1}
 input[type=text]{padding:8px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--fg)}
 input[type=text]:focus{outline:none;border-color:#64b5f6}
+select{padding:8px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--fg);font-size:14px;min-width:200px}
+select:focus{outline:none;border-color:#64b5f6}
+option{background:var(--card-bg);color:var(--fg);padding:8px}
+option.depth-1{padding-left:20px}
+option.depth-2{padding-left:40px}
+option.depth-3{padding-left:60px}
+option.depth-4{padding-left:80px}
 .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
 .field{margin-bottom:12px}
 .field label{display:block;font-weight:600;margin-bottom:4px;color:var(--fg)}
@@ -122,8 +129,11 @@ input[type=text]:focus{outline:none;border-color:#64b5f6}
     
     <div id="terminal" class="tab-content">
       <div class="toolbar">
-        <input type="text" id="termId" placeholder="Task ID">
-        <button class="btn-primary" id="loadTermBtn">Load</button>
+        <input type="text" id="termTaskId" placeholder="Task ID" style="width:150px">
+        <select id="termNodeSelect" style="flex:1;max-width:400px">
+          <option value="">Select task first...</option>
+        </select>
+        <button class="btn-primary" id="loadTermBtn">🔄 Refresh</button>
         <button id="termAuto" class="btn-primary">Auto: OFF</button>
       </div>
       <div id="termView" class="terminal"></div>
@@ -131,8 +141,11 @@ input[type=text]:focus{outline:none;border-color:#64b5f6}
     
     <div id="llm" class="tab-content">
       <div class="toolbar">
-        <input type="text" id="llmId" placeholder="Task ID">
-        <button class="btn-primary" id="loadLLMBtn">Load</button>
+        <input type="text" id="llmTaskId" placeholder="Task ID" style="width:150px">
+        <select id="llmNodeSelect" style="flex:1;max-width:400px">
+          <option value="">Select task first...</option>
+        </select>
+        <button class="btn-primary" id="loadLLMBtn">🔄 Refresh</button>
         <button id="llmAuto" class="btn-primary">Auto: OFF</button>
       </div>
       <div id="llmView" class="terminal" style="color:#ff0;background:#1a1a1a"></div>
@@ -160,12 +173,14 @@ mermaid.initialize({startOnLoad:false,theme:'dark'});
 
 // Global state
 let task=null,orig=null,curPath='/app/work',curTask=null;
-let intervals={graph:null,term:null,llm:null,poll:null};
+let intervals={graph:null,term:null,llm:null,poll:null,termNodes:null,llmNodes:null};
 let auto={graph:false,term:false,llm:false};
+let nodeCache={};  // Cache nodes per task
 
 // DOM element references
 let input, status, startBtn, resetBtn, taskCard, abstract, description, verification;
-let graphId, termId, llmId, graphView, termView, llmView, fileGrid, fileView, path, upBtn, taskList, count;
+let graphId, termTaskId, llmTaskId, termNodeSelect, llmNodeSelect;
+let graphView, termView, llmView, fileGrid, fileView, path, upBtn, taskList, count;
 let refreshTasksBtn, loadGraphBtn, loadTermBtn, loadLLMBtn, graphAuto, termAuto, llmAuto;
 let navWork, navLogs, navShared;
 
@@ -189,8 +204,10 @@ document.addEventListener('DOMContentLoaded',()=>{
   description = document.getElementById('description');
   verification = document.getElementById('verification');
   graphId = document.getElementById('graphId');
-  termId = document.getElementById('termId');
-  llmId = document.getElementById('llmId');
+  termTaskId = document.getElementById('termTaskId');
+  llmTaskId = document.getElementById('llmTaskId');
+  termNodeSelect = document.getElementById('termNodeSelect');
+  llmNodeSelect = document.getElementById('llmNodeSelect');
   graphView = document.getElementById('graphView');
   termView = document.getElementById('termView');
   llmView = document.getElementById('llmView');
@@ -217,7 +234,6 @@ document.addEventListener('DOMContentLoaded',()=>{
   input.addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey){
       e.preventDefault();
-      console.log('Enter key pressed');
       handleStart();
     }
   });
@@ -226,7 +242,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   resetBtn.addEventListener('click', handleReset);
   refreshTasksBtn.addEventListener('click', loadTasks);
   loadGraphBtn.addEventListener('click', loadGraph);
-  loadTermBtn.addEventListener('click', loadTerm);
+  loadTermBtn.addEventListener('click', loadTerminal);
   loadLLMBtn.addEventListener('click', loadLLM);
   graphAuto.addEventListener('click', ()=>toggleAuto('graph'));
   termAuto.addEventListener('click', ()=>toggleAuto('term'));
@@ -235,6 +251,14 @@ document.addEventListener('DOMContentLoaded',()=>{
   navWork.addEventListener('click', ()=>loadFiles('/app/work'));
   navLogs.addEventListener('click', ()=>loadFiles('/app/logs'));
   navShared.addEventListener('click', ()=>loadFiles('/shared'));
+  
+  // Task ID change listeners for dropdowns
+  termTaskId.addEventListener('change', loadTerminalNodes);
+  llmTaskId.addEventListener('change', loadLLMNodes);
+  
+  // Node selection change listeners - auto-load when node selected
+  termNodeSelect.addEventListener('change', loadTerminal);
+  llmNodeSelect.addEventListener('change', loadLLM);
   
   // Tab switching
   document.querySelectorAll('.tab').forEach(tab=>{
@@ -258,7 +282,131 @@ function switchTab(name){
   else if(name==='tasks')loadTasks();
 }
 
-// Main start function - handles both translate and execute
+// Node dropdown population
+async function loadTerminalNodes(){
+  const taskId = termTaskId.value.trim();
+  if(!taskId){
+    termNodeSelect.innerHTML='<option value="">Select task first...</option>';
+    return;
+  }
+  
+  // Remember currently selected node
+  const currentSelection = termNodeSelect.value;
+  const hadSelection = currentSelection && currentSelection !== '';
+  
+  try{
+    const r = await fetch('/task/'+taskId+'/nodes');
+    const d = await r.json();
+    
+    if(d.error){
+      termNodeSelect.innerHTML='<option value="">Error loading nodes</option>';
+      return;
+    }
+    
+    nodeCache[taskId] = d.nodes;
+    populateNodeDropdown(termNodeSelect, d.nodes);
+    
+    // Restore previous selection if it still exists
+    if(hadSelection){
+      const optionExists = Array.from(termNodeSelect.options).some(opt => opt.value === currentSelection);
+      if(optionExists){
+        termNodeSelect.value = currentSelection;
+      }
+    } else if(d.nodes.length > 0) {
+      // Auto-select first node if no previous selection
+      termNodeSelect.value = d.nodes[0].node_id;
+      // Auto-load the first node
+      await loadTerminal();
+    }
+    
+  }catch(e){
+    console.error('Error loading nodes:', e);
+    termNodeSelect.innerHTML='<option value="">Error loading nodes</option>';
+  }
+}
+
+async function loadLLMNodes(){
+  const taskId = llmTaskId.value.trim();
+  if(!taskId){
+    llmNodeSelect.innerHTML='<option value="">Select task first...</option>';
+    return;
+  }
+  
+  // Remember currently selected node
+  const currentSelection = llmNodeSelect.value;
+  const hadSelection = currentSelection && currentSelection !== '';
+  
+  try{
+    const r = await fetch('/task/'+taskId+'/nodes');
+    const d = await r.json();
+    
+    if(d.error){
+      llmNodeSelect.innerHTML='<option value="">Error loading nodes</option>';
+      return;
+    }
+    
+    nodeCache[taskId] = d.nodes;
+    populateNodeDropdown(llmNodeSelect, d.nodes);
+    
+    // Restore previous selection if it still exists
+    if(hadSelection){
+      const optionExists = Array.from(llmNodeSelect.options).some(opt => opt.value === currentSelection);
+      if(optionExists){
+        llmNodeSelect.value = currentSelection;
+      }
+    } else if(d.nodes.length > 0) {
+      // Auto-select first node if no previous selection
+      llmNodeSelect.value = d.nodes[0].node_id;
+      // Auto-load the first node
+      await loadLLM();
+    }
+    
+  }catch(e){
+    console.error('Error loading nodes:', e);
+    llmNodeSelect.innerHTML='<option value="">Error loading nodes</option>';
+  }
+}
+
+function populateNodeDropdown(selectEl, nodes){
+  selectEl.innerHTML = '';
+  
+  if(!nodes || nodes.length === 0){
+    selectEl.innerHTML = '<option value="">No nodes yet</option>';
+    return;
+  }
+  
+  // Add each node with indentation based on depth
+  nodes.forEach(node => {
+    const opt = document.createElement('option');
+    opt.value = node.node_id;
+    
+    // Create indentation
+    const indent = '　'.repeat(node.depth);  // Japanese space for better visual
+    
+    // Status emoji
+    const statusEmoji = {
+      'pending': '⏳',
+      'planning': '🧠',
+      'working': '⚙️',
+      'completed': '✅',
+      'failed': '❌',
+      'cancelled': '🚫',
+      'impossible': '⛔'
+    }[node.status] || '◯';
+    
+    // Truncate abstract for dropdown
+    const abstractShort = node.abstract.length > 50 
+      ? node.abstract.substring(0, 50) + '...' 
+      : node.abstract;
+    
+    opt.textContent = `${indent}${statusEmoji} ${abstractShort}`;
+    opt.className = `depth-${node.depth}`;
+    
+    selectEl.appendChild(opt);
+  });
+}
+
+// Main start function
 async function handleStart(){
   console.log('handleStart called, task=', task);
   
@@ -307,7 +455,7 @@ async function handleStart(){
     return;
   }
   
-  // Step 2: Execute the task (update task with current field values)
+  // Step 2: Execute the task
   task = {
     abstract: abstract.value.trim(),
     description: description.value.trim(),
@@ -339,7 +487,12 @@ async function handleStart(){
     }
     
     curTask=d.task_id;
-    graphId.value=termId.value=llmId.value=curTask;
+    graphId.value=termTaskId.value=llmTaskId.value=curTask;
+    
+    // Load nodes for dropdowns
+    await loadTerminalNodes();
+    await loadLLMNodes();
+    
     msg('✅ Task '+curTask+' running','#4caf50');
     switchTab('terminal');
     startAuto();
@@ -356,11 +509,14 @@ function handleReset(){
   Object.values(intervals).forEach(i=>i&&clearInterval(i));
   task=orig=null;
   curTask=null;
+  nodeCache={};
   input.value='';
   abstract.value='';
   description.value='';
   verification.value='';
   taskCard.style.display='none';
+  termNodeSelect.innerHTML='<option value="">Select task first...</option>';
+  llmNodeSelect.innerHTML='<option value="">Select task first...</option>';
   startBtn.disabled=false;
   startBtn.innerHTML='▶️ Start';
   msg('🔄 Reset');
@@ -394,7 +550,9 @@ async function loadTasks(){
 }
 
 async function viewTask(id){
-  graphId.value=termId.value=llmId.value=id;
+  graphId.value=termTaskId.value=llmTaskId.value=id;
+  await loadTerminalNodes();
+  await loadLLMNodes();
   await loadGraph();
   switchTab('graph');
 }
@@ -438,7 +596,6 @@ async function loadGraph(){
     const d=await r.json();
     if(d.error)return graphView.innerHTML='<div style="color:#f44336;padding:20px">'+d.error+'</div>';
     
-    // Inject custom Mermaid theme configuration
     let graph = d.graph;
     if(!graph.includes('%%{init:')){
       graph = `%%{init: {'theme':'dark', 'themeVariables': {
@@ -463,26 +620,52 @@ async function loadGraph(){
   }catch(e){graphView.innerHTML='<div style="color:#f44336">'+e.message+'</div>'}
 }
 
-async function loadTerm(){
-  const id=termId.value.trim();
-  if(!id)return msg('⚠ Enter task ID','#ff9800');
+async function loadTerminal(){
+  const nodeId = termNodeSelect.value;
+  if(!nodeId){
+    // Silently return if no node selected
+    return;
+  }
+  
   try{
-    const r=await fetch('/task/'+id);
-    const d=await r.json();
-    termView.textContent=d.error?d.error:d.terminal_output&&d.terminal_output.length?d.terminal_output.join('\n'):'No output yet';
-    termView.scrollTop=termView.scrollHeight;
-  }catch(e){termView.textContent=e.message}
+    const r = await fetch('/node/'+nodeId+'/log');
+    const d = await r.json();
+    
+    if(d.error){
+      termView.textContent = d.error;
+      return;
+    }
+    
+    termView.textContent = d.log;
+    termView.scrollTop = termView.scrollHeight;
+    
+  }catch(e){
+    termView.textContent = 'Error: ' + e.message;
+  }
 }
 
 async function loadLLM(){
-  const id=llmId.value.trim();
-  if(!id)return msg('⚠ Enter task ID','#ff9800');
+  const nodeId = llmNodeSelect.value;
+  if(!nodeId){
+    // Silently return if no node selected
+    return;
+  }
+  
   try{
-    const r=await fetch('/task/'+id);
-    const d=await r.json();
-    llmView.textContent=d.error?d.error:d.llm_responses&&d.llm_responses.length?d.llm_responses.map((x,i)=>'['+(i+1)+'] '+x).join('\n\n'+'='.repeat(80)+'\n\n'):'No responses yet';
-    llmView.scrollTop=llmView.scrollHeight;
-  }catch(e){llmView.textContent=e.message}
+    const r = await fetch('/node/'+nodeId+'/log');
+    const d = await r.json();
+    
+    if(d.error){
+      llmView.textContent = d.error;
+      return;
+    }
+    
+    llmView.textContent = d.log;
+    llmView.scrollTop = llmView.scrollHeight;
+    
+  }catch(e){
+    llmView.textContent = 'Error: ' + e.message;
+  }
 }
 
 function toggleAuto(type){
@@ -490,31 +673,59 @@ function toggleAuto(type){
   const btn=type==='graph'?graphAuto:type==='term'?termAuto:llmAuto;
   btn.textContent='Auto: '+(auto[type]?'ON':'OFF');
   btn.className=auto[type]?'btn-success':'btn-primary';
+  
   if(auto[type]){
-    const id=(type==='graph'?graphId:type==='term'?termId:llmId).value.trim();
-    if(!id)return;
-    intervals[type]=setInterval(()=>type==='graph'?loadGraph():type==='term'?loadTerm():loadLLM(),3000);
-  }else if(intervals[type]){
-    clearInterval(intervals[type]);
-    intervals[type]=null;
+    if(type==='graph'){
+      intervals.graph=setInterval(loadGraph,3000);
+    }else if(type==='term'){
+      intervals.term=setInterval(loadTerminal,3000);
+      intervals.termNodes=setInterval(loadTerminalNodes,5000);
+    }else if(type==='llm'){
+      intervals.llm=setInterval(loadLLM,3000);
+      intervals.llmNodes=setInterval(loadLLMNodes,5000);
+    }
+  }else{
+    if(type==='graph' && intervals.graph){
+      clearInterval(intervals.graph);
+      intervals.graph=null;
+    }else if(type==='term'){
+      if(intervals.term){clearInterval(intervals.term);intervals.term=null;}
+      if(intervals.termNodes){clearInterval(intervals.termNodes);intervals.termNodes=null;}
+    }else if(type==='llm'){
+      if(intervals.llm){clearInterval(intervals.llm);intervals.llm=null;}
+      if(intervals.llmNodes){clearInterval(intervals.llmNodes);intervals.llmNodes=null;}
+    }
   }
 }
 
 function startAuto(){
-  ['graph','term','llm'].forEach(t=>{
-    auto[t]=true;
-    const btn=t==='graph'?graphAuto:t==='term'?termAuto:llmAuto;
-    btn.textContent='Auto: ON';
-    btn.className='btn-success';
-    intervals[t]=setInterval(()=>t==='graph'?loadGraph():t==='term'?loadTerm():loadLLM(),3000);
-  });
+  // Enable auto-refresh for all tabs
+  auto.graph=auto.term=auto.llm=true;
+  
+  graphAuto.textContent='Auto: ON';
+  graphAuto.className='btn-success';
+  intervals.graph=setInterval(loadGraph,3000);
+  
+  termAuto.textContent='Auto: ON';
+  termAuto.className='btn-success';
+  intervals.term=setInterval(loadTerminal,3000);
+  intervals.termNodes=setInterval(loadTerminalNodes,5000);
+  
+  llmAuto.textContent='Auto: ON';
+  llmAuto.className='btn-success';
+  intervals.llm=setInterval(loadLLM,3000);
+  intervals.llmNodes=setInterval(loadLLMNodes,5000);
+  
   intervals.poll=setInterval(async()=>{
     try{
       const r=await fetch('/task/'+curTask);
       const d=await r.json();
       if(['completed','failed','cancelled','impossible'].includes(d.status)){
         Object.values(intervals).forEach(i=>i&&clearInterval(i));
-        loadTerm();loadLLM();loadGraph();loadTasks();
+        loadTerminal();
+        loadLLM();
+        loadGraph();
+        loadTasks();
         msg('✅ Task '+d.status,d.status==='completed'?'#4caf50':'#f44336');
       }
     }catch(e){}

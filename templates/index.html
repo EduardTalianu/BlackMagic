@@ -24,6 +24,7 @@ button:disabled{opacity:0.5;cursor:not-allowed}
 .btn-success{background:#4caf50;color:#fff}
 .btn-danger{background:#f44336;color:#fff}
 .btn-warning{background:#ff9800;color:#fff}
+.btn-info{background:#00bcd4;color:#fff}
 button:hover:not(:disabled){opacity:0.9}
 .btn-group{display:flex;gap:8px}
 .tabs{display:flex;border-bottom:2px solid var(--grid-border);margin-bottom:10px}
@@ -38,10 +39,12 @@ button:hover:not(:disabled){opacity:0.9}
 .task.completed{border-left-color:#4caf50}
 .task.failed{border-left-color:#f44336}
 .task.planning{border-left-color:#2196f3}
+.task.cancelled{border-left-color:#9e9e9e}
+.task.impossible{border-left-color:#9c27b0}
 .task-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 .badge{padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;text-transform:uppercase;background:var(--badge-bg)}
 .node{margin-left:30px;border-left-color:#999}
-.controls{display:flex;gap:5px;margin-top:8px}
+.controls{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
 .controls button{padding:4px 10px;font-size:12px}
 .file-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
 .file-card{padding:20px;border:2px solid var(--grid-border);border-radius:8px;text-align:center;cursor:pointer;transition:all 0.2s;background:var(--card-bg)}
@@ -70,6 +73,12 @@ option.depth-4{padding-left:80px}
 .viewer pre{background:var(--card-bg);padding:15px;border-radius:4px;overflow-x:auto;margin:10px 0;border:1px solid var(--card-border);color:var(--fg)}
 .quick-nav{display:flex;gap:10px;margin-bottom:10px}
 .quick-nav button{padding:6px 12px;font-size:13px}
+.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:1000;align-items:center;justify-content:center}
+.modal.active{display:flex}
+.modal-content{background:var(--card-bg);border:1px solid var(--card-border);border-radius:8px;padding:20px;max-width:500px;width:90%}
+.modal-content h3{margin:0 0 15px 0}
+.modal-content textarea{min-height:100px;margin-bottom:15px}
+.modal-buttons{display:flex;gap:10px;justify-content:flex-end}
 </style>
 </head>
 <body>
@@ -156,6 +165,32 @@ option.depth-4{padding-left:80px}
   </div>
 </div>
 
+<!-- Modal for task improvement comments -->
+<div id="improveTaskModal" class="modal">
+  <div class="modal-content">
+    <h3>💡 Improve Task with Comments</h3>
+    <p style="margin:0 0 10px 0;color:#aaa">Provide improvement notes that will be added to the task description:</p>
+    <textarea id="improveTaskComments" placeholder="Example: Try using different tools like dnsenum instead of subfinder. Focus on finding subdomains with HTTPS enabled."></textarea>
+    <div class="modal-buttons">
+      <button class="btn-danger" id="improveTaskCancelBtn">Cancel</button>
+      <button class="btn-success" id="improveTaskSubmitBtn">🚀 Restart with Improvements</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal for node improvement comments -->
+<div id="improveNodeModal" class="modal">
+  <div class="modal-content">
+    <h3>💡 Improve Node with Comments</h3>
+    <p style="margin:0 0 10px 0;color:#aaa">Provide improvement notes for this specific node:</p>
+    <textarea id="improveNodeComments" placeholder="Example: Use more aggressive scanning options. Check for additional ports beyond the standard ones."></textarea>
+    <div class="modal-buttons">
+      <button class="btn-danger" id="improveNodeCancelBtn">Cancel</button>
+      <button class="btn-success" id="improveNodeSubmitBtn">🚀 Restart Node with Improvements</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
 <script>
 mermaid.initialize({startOnLoad:false,theme:'dark'});
@@ -164,7 +199,9 @@ mermaid.initialize({startOnLoad:false,theme:'dark'});
 let task=null,orig=null,curPath='/app/work',curTask=null;
 let intervals={graph:null,output:null,poll:null,outputNodes:null};
 let auto={graph:false,output:false};
-let nodeCache={};  // Cache nodes per task
+let nodeCache={};
+let improveTaskId=null;
+let improveNodeId=null;
 
 // DOM element references
 let input, status, startBtn, resetBtn, taskCard, abstract, description, verification;
@@ -172,6 +209,8 @@ let graphId, outputTaskId, outputNodeSelect;
 let graphView, outputView, fileGrid, fileView, path, upBtn, taskList, count;
 let refreshTasksBtn, loadGraphBtn, loadOutputBtn, graphAuto, outputAuto;
 let navWork, navLogs, navShared;
+let improveTaskModal, improveTaskComments, improveTaskCancelBtn, improveTaskSubmitBtn;
+let improveNodeModal, improveNodeComments, improveNodeCancelBtn, improveNodeSubmitBtn;
 
 function msg(t,c='#2196f3'){
   if(!status) return;
@@ -211,6 +250,14 @@ document.addEventListener('DOMContentLoaded',()=>{
   navWork = document.getElementById('navWork');
   navLogs = document.getElementById('navLogs');
   navShared = document.getElementById('navShared');
+  improveTaskModal = document.getElementById('improveTaskModal');
+  improveTaskComments = document.getElementById('improveTaskComments');
+  improveTaskCancelBtn = document.getElementById('improveTaskCancelBtn');
+  improveTaskSubmitBtn = document.getElementById('improveTaskSubmitBtn');
+  improveNodeModal = document.getElementById('improveNodeModal');
+  improveNodeComments = document.getElementById('improveNodeComments');
+  improveNodeCancelBtn = document.getElementById('improveNodeCancelBtn');
+  improveNodeSubmitBtn = document.getElementById('improveNodeSubmitBtn');
   
   console.log('Elements initialized');
   
@@ -234,10 +281,18 @@ document.addEventListener('DOMContentLoaded',()=>{
   navLogs.addEventListener('click', ()=>loadFiles('/app/logs'));
   navShared.addEventListener('click', ()=>loadFiles('/shared'));
   
+  // Task improvement modal
+  improveTaskCancelBtn.addEventListener('click', ()=>{improveTaskModal.classList.remove('active');improveTaskId=null;});
+  improveTaskSubmitBtn.addEventListener('click', submitTaskImprovement);
+  
+  // Node improvement modal
+  improveNodeCancelBtn.addEventListener('click', ()=>{improveNodeModal.classList.remove('active');improveNodeId=null;});
+  improveNodeSubmitBtn.addEventListener('click', submitNodeImprovement);
+  
   // Task ID change listeners for dropdowns
   outputTaskId.addEventListener('change', loadOutputNodes);
   
-  // Node selection change listeners - auto-load when node selected
+  // Node selection change listeners
   outputNodeSelect.addEventListener('change', loadOutput);
   
   // Tab switching
@@ -270,7 +325,6 @@ async function loadOutputNodes(){
     return;
   }
   
-  // Remember currently selected node
   const currentSelection = outputNodeSelect.value;
   const hadSelection = currentSelection && currentSelection !== '';
   
@@ -286,16 +340,13 @@ async function loadOutputNodes(){
     nodeCache[taskId] = d.nodes;
     populateNodeDropdown(outputNodeSelect, d.nodes);
     
-    // Restore previous selection if it still exists
     if(hadSelection){
       const optionExists = Array.from(outputNodeSelect.options).some(opt => opt.value === currentSelection);
       if(optionExists){
         outputNodeSelect.value = currentSelection;
       }
     } else if(d.nodes.length > 0) {
-      // Auto-select first node if no previous selection
       outputNodeSelect.value = d.nodes[0].node_id;
-      // Auto-load the first node
       await loadOutput();
     }
     
@@ -313,15 +364,12 @@ function populateNodeDropdown(selectEl, nodes){
     return;
   }
   
-  // Add each node with indentation based on depth
   nodes.forEach(node => {
     const opt = document.createElement('option');
     opt.value = node.node_id;
     
-    // Create indentation
-    const indent = '　'.repeat(node.depth);  // Japanese space for better visual
+    const indent = '　'.repeat(node.depth);
     
-    // Status emoji
     const statusEmoji = {
       'pending': '⏳',
       'planning': '🧠',
@@ -332,7 +380,6 @@ function populateNodeDropdown(selectEl, nodes){
       'impossible': '⛔'
     }[node.status] || '◯';
     
-    // Truncate abstract for dropdown
     const abstractShort = node.abstract.length > 50 
       ? node.abstract.substring(0, 50) + '...' 
       : node.abstract;
@@ -348,7 +395,6 @@ function populateNodeDropdown(selectEl, nodes){
 async function handleStart(){
   console.log('handleStart called, task=', task);
   
-  // Step 1: Translate if no task exists
   if(!task){
     const txt=input.value.trim();
     if(!txt){
@@ -393,7 +439,6 @@ async function handleStart(){
     return;
   }
   
-  // Step 2: Execute the task
   task = {
     abstract: abstract.value.trim(),
     description: description.value.trim(),
@@ -427,7 +472,6 @@ async function handleStart(){
     curTask=d.task_id;
     graphId.value=outputTaskId.value=curTask;
     
-    // Load nodes for dropdown
     await loadOutputNodes();
     
     msg('✅ Task '+curTask+' running','#4caf50');
@@ -469,23 +513,68 @@ async function loadTasks(){
     count.textContent=roots.length+' task(s), '+nodes.length+' node(s)';
     if(!roots.length)return taskList.innerHTML='<div style="color:#999;padding:40px;text-align:center">No tasks yet</div>';
     taskList.innerHTML='';
+    
     roots.forEach(t=>{
       const div=document.createElement('div');
       div.className='task '+t.status;
-      div.innerHTML=`<div class="task-header"><span style="font-family:monospace">🎯 ${t.task_id}</span><span class="badge">${t.status}</span></div><div style="font-weight:600">${t.abstract}</div>`;
-      div.onclick=()=>viewTask(t.task_id);
+      
+      // Debug log
+      console.log('Task:', t.task_id, 'Status:', t.status, 'Restartable:', t.is_restartable);
+      
+      // Determine button states
+      const canImprove = t.status==='failed' || t.status==='cancelled' || t.status==='impossible' || t.status==='completed';
+      const canCancel = t.status==='working' || t.status==='planning' || t.status==='pending';
+      
+      div.innerHTML=`
+        <div class="task-header">
+          <span style="font-family:monospace">🎯 ${t.task_id}</span>
+          <span class="badge">${t.status}</span>
+        </div>
+        <div style="font-weight:600;margin-bottom:8px">${t.abstract}</div>
+        <div class="controls">
+          <button class="btn-primary" onclick="viewTask('${t.task_id}',event)">👁 View</button>
+          <button class="btn-warning" onclick="cancelTask('${t.task_id}',event)" ${canCancel?'':'disabled'} title="${canCancel?'Cancel this task':'Task must be running'}">⏸ Cancel</button>
+          <button class="btn-success" onclick="completeTask('${t.task_id}',event)">✅ Complete</button>
+          <button class="btn-info" onclick="showTaskImprove('${t.task_id}',event)" ${canImprove?'':'disabled'} title="${canImprove?'Restart with improvements':'Task must be completed or failed'}">💡 Improve</button>
+        </div>
+      `;
       taskList.appendChild(div);
+      
       nodes.filter(n=>n.task_id===t.task_id).forEach(n=>{
         const nd=document.createElement('div');
         nd.className='task node '+n.status;
-        nd.innerHTML=`<div class="task-header"><span style="font-family:monospace">📦 ${n.node_id}</span><span class="badge">${n.status}</span></div><div>${n.abstract}</div><div class="controls"><button class="btn-primary" onclick="viewNode('${n.node_id}',event)">👁</button><button class="btn-warning" onclick="stopNode('${n.node_id}',event)">⏸</button><button class="btn-danger" onclick="delNode('${n.node_id}',event)">🗑</button></div>`;
+        
+        // Debug log
+        console.log('Node:', n.node_id, 'Status:', n.status, 'Restartable:', n.is_restartable);
+        
+        // Determine button states
+        const canStart = n.status==='pending' || n.status==='cancelled' || n.status==='failed';
+        const canImprove = n.status==='failed' || n.status==='cancelled' || n.status==='impossible';
+        const canCancel = n.status==='working' || n.status==='planning' || n.status==='pending';
+        
+        nd.innerHTML=`
+          <div class="task-header">
+            <span style="font-family:monospace">📦 ${n.node_id}</span>
+            <span class="badge">${n.status}</span>
+          </div>
+          <div style="margin-bottom:8px">${n.abstract}</div>
+          <div class="controls">
+            <button class="btn-primary" onclick="viewNode('${n.node_id}',event)">👁 View</button>
+            <button class="btn-warning" onclick="cancelNode('${n.node_id}',event)" ${canCancel?'':'disabled'}>⏸ Cancel</button>
+            <button class="btn-success" onclick="completeNode('${n.node_id}',event)">✅ Complete</button>
+            <button class="btn-info" onclick="forceStartNode('${n.node_id}',event)" ${canStart?'':'disabled'} title="${canStart?'Force start this node':'Node must be pending, cancelled, or failed'}">▶️ Start</button>
+            <button class="btn-info" onclick="showNodeImprove('${n.node_id}',event)" ${canImprove?'':'disabled'} title="${canImprove?'Restart with improvements':'Node must be failed, cancelled, or impossible'}">💡 Improve</button>
+            <button class="btn-danger" onclick="removeNode('${n.node_id}',event)">🗑 Remove</button>
+          </div>
+        `;
         taskList.appendChild(nd);
       });
     });
   }catch(e){taskList.innerHTML='<div style="color:#f44336">Error: '+e.message+'</div>'}
 }
 
-async function viewTask(id){
+async function viewTask(id,e){
+  e.stopPropagation();
   graphId.value=outputTaskId.value=id;
   await loadOutputNodes();
   await loadGraph();
@@ -497,30 +586,150 @@ async function viewNode(id,e){
   try{
     const r=await fetch('/node/'+id);
     const d=await r.json();
-    alert('Node: '+id+'\nStatus: '+d.status+'\nAbstract: '+d.abstract+'\n\nOutputs: '+d.terminal_output.length+'\nLLM: '+d.llm_responses.length);
+    alert('Node: '+id+'\nStatus: '+d.status+'\nAbstract: '+d.abstract+'\n\nTerminal Outputs: '+d.terminal_output.length+'\nLLM Responses: '+d.llm_responses.length);
   }catch(e){msg('❌ '+e.message,'#f44336')}
 }
 
-async function stopNode(id,e){
+async function cancelTask(id,e){
   e.stopPropagation();
-  if(!confirm('Stop node '+id+'?'))return;
+  if(!confirm('Cancel task '+id+' and all its nodes?'))return;
   try{
-    const r=await fetch('/node/'+id+'/stop',{method:'PUT'});
+    const r=await fetch('/task/'+id+'/cancel',{method:'PUT'});
     const d=await r.json();
-    msg(d.error?'❌ '+d.error:'✅ Stopped '+id,d.error?'#f44336':'#4caf50');
+    msg(d.error?'❌ '+d.error:'✅ Cancelled '+id,d.error?'#f44336':'#4caf50');
     loadTasks();
   }catch(e){msg('❌ '+e.message,'#f44336')}
 }
 
-async function delNode(id,e){
+async function cancelNode(id,e){
   e.stopPropagation();
-  if(!confirm('Remove node '+id+'?'))return;
+  if(!confirm('Cancel node '+id+'?'))return;
+  try{
+    const r=await fetch('/node/'+id+'/cancel',{method:'PUT'});
+    const d=await r.json();
+    msg(d.error?'❌ '+d.error:'✅ Cancelled '+id,d.error?'#f44336':'#4caf50');
+    loadTasks();
+  }catch(e){msg('❌ '+e.message,'#f44336')}
+}
+
+async function completeTask(id,e){
+  e.stopPropagation();
+  if(!confirm('Mark task '+id+' as completed?'))return;
+  try{
+    const r=await fetch('/task/'+id+'/complete',{method:'PUT'});
+    const d=await r.json();
+    msg(d.error?'❌ '+d.error:'✅ Completed '+id,d.error?'#f44336':'#4caf50');
+    loadTasks();
+  }catch(e){msg('❌ '+e.message,'#f44336')}
+}
+
+async function completeNode(id,e){
+  e.stopPropagation();
+  if(!confirm('Mark node '+id+' as completed?'))return;
+  try{
+    const r=await fetch('/node/'+id+'/complete',{method:'PUT'});
+    const d=await r.json();
+    msg(d.error?'❌ '+d.error:'✅ Completed '+id,d.error?'#f44336':'#4caf50');
+    loadTasks();
+  }catch(e){msg('❌ '+e.message,'#f44336')}
+}
+
+async function forceStartNode(id,e){
+  e.stopPropagation();
+  if(!confirm('Force start node '+id+'?'))return;
+  try{
+    const r=await fetch('/node/'+id+'/start',{method:'POST'});
+    const d=await r.json();
+    msg(d.error?'❌ '+d.error:'✅ Started '+id,d.error?'#f44336':'#4caf50');
+    loadTasks();
+  }catch(e){msg('❌ '+e.message,'#f44336')}
+}
+
+async function removeNode(id,e){
+  e.stopPropagation();
+  if(!confirm('Remove node '+id+' and its subtree?'))return;
   try{
     const r=await fetch('/node/'+id+'/remove',{method:'DELETE'});
     const d=await r.json();
     msg(d.error?'❌ '+d.error:'✅ Removed '+id,d.error?'#f44336':'#4caf50');
     loadTasks();
   }catch(e){msg('❌ '+e.message,'#f44336')}
+}
+
+function showTaskImprove(id,e){
+  e.stopPropagation();
+  improveTaskId=id;
+  improveTaskComments.value='';
+  improveTaskModal.classList.add('active');
+}
+
+function showNodeImprove(id,e){
+  e.stopPropagation();
+  improveNodeId=id;
+  improveNodeComments.value='';
+  improveNodeModal.classList.add('active');
+}
+
+async function submitTaskImprovement(){
+  if(!improveTaskId)return;
+  
+  const comments=improveTaskComments.value.trim();
+  
+  try{
+    const r=await fetch('/task/'+improveTaskId+'/restart',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({comments:comments})
+    });
+    const d=await r.json();
+    
+    if(d.error){
+      msg('❌ '+d.error,'#f44336');
+    }else{
+      msg('✅ Restarted as '+d.new_task_id+(comments?' with improvements':''),'#4caf50');
+      curTask=d.new_task_id;
+      graphId.value=outputTaskId.value=d.new_task_id;
+      await loadOutputNodes();
+      switchTab('output');
+      startAuto();
+    }
+    
+    improveTaskModal.classList.remove('active');
+    improveTaskId=null;
+    loadTasks();
+    
+  }catch(e){
+    msg('❌ '+e.message,'#f44336');
+  }
+}
+
+async function submitNodeImprovement(){
+  if(!improveNodeId)return;
+  
+  const comments=improveNodeComments.value.trim();
+  
+  try{
+    const r=await fetch('/node/'+improveNodeId+'/restart',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({comments:comments})
+    });
+    const d=await r.json();
+    
+    if(d.error){
+      msg('❌ '+d.error,'#f44336');
+    }else{
+      msg('✅ Node restarted as '+d.new_node_id+(comments?' with improvements':''),'#4caf50');
+    }
+    
+    improveNodeModal.classList.remove('active');
+    improveNodeId=null;
+    loadTasks();
+    loadGraph();
+    
+  }catch(e){
+    msg('❌ '+e.message,'#f44336');
+  }
 }
 
 async function loadGraph(){
@@ -558,7 +767,6 @@ async function loadGraph(){
 async function loadOutput(){
   const nodeId = outputNodeSelect.value;
   if(!nodeId){
-    // Silently return if no node selected
     return;
   }
   
@@ -604,7 +812,6 @@ function toggleAuto(type){
 }
 
 function startAuto(){
-  // Enable auto-refresh for all tabs
   auto.graph=auto.output=true;
   
   graphAuto.textContent='Auto: ON';

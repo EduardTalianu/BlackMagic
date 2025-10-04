@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-app.py - Enhanced with node logging endpoints
+app.py - Fixed status tracking and added force start + improve for nodes
 """
 import os
 import docker
@@ -265,7 +265,7 @@ def get_all_tasks():
         
         print(f"[API] Returning {len(tasks)} task/node entries")
         for t in tasks[:5]:
-            print(f"[API]   - {t.get('type', 'unknown')}: {t.get('abstract', 'N/A')[:50]}")
+            print(f"[API]   - {t.get('type', 'unknown')}: {t.get('abstract', 'N/A')[:50]} [{t.get('status')}]")
         
         return jsonify({"tasks": tasks})
         
@@ -320,9 +320,9 @@ def get_task_nodes(task_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/task/<task_id>/stop", methods=["PUT"])
+@app.route("/task/<task_id>/cancel", methods=["PUT"])
 def cancel_task(task_id):
-    """Cancel a running task"""
+    """Cancel a running task and all its nodes"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
@@ -337,9 +337,51 @@ def cancel_task(task_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/node/<node_id>/stop", methods=["PUT"])
-def stop_node(node_id):
-    """Stop/cancel a specific node"""
+@app.route("/task/<task_id>/complete", methods=["PUT"])
+def complete_task(task_id):
+    """Mark a task as completed"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        success = task_manager.mark_task_complete(task_id)
+        if success:
+            return jsonify({"status": "completed", "task_id": task_id})
+        else:
+            return jsonify({"error": "Task not found or cannot be completed"}), 400
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/task/<task_id>/restart", methods=["POST"])
+def restart_task(task_id):
+    """Restart a task with optional improvement comments"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        data = request.json or {}
+        comments = data.get("comments", "")
+        
+        new_task_id = task_manager.restart_task(task_id, comments)
+        if new_task_id:
+            return jsonify({
+                "status": "restarted",
+                "old_task_id": task_id,
+                "new_task_id": new_task_id,
+                "message": "Task restarted with improvements" if comments else "Task restarted"
+            })
+        else:
+            return jsonify({"error": "Task not found or cannot be restarted"}), 400
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/cancel", methods=["PUT"])
+def cancel_node(node_id):
+    """Cancel a specific node (keeps it in tree but stops execution)"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
@@ -354,9 +396,68 @@ def stop_node(node_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/node/<node_id>/complete", methods=["PUT"])
+def complete_node(node_id):
+    """Mark a node as completed"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        success = task_manager.mark_node_complete(node_id)
+        if success:
+            return jsonify({"status": "completed", "node_id": node_id})
+        else:
+            return jsonify({"error": "Node not found or cannot be completed"}), 400
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/start", methods=["POST"])
+def force_start_node(node_id):
+    """Force start a pending/cancelled node"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        success = task_manager.force_start_node(node_id)
+        if success:
+            return jsonify({"status": "started", "node_id": node_id})
+        else:
+            return jsonify({"error": "Node not found or cannot be started"}), 400
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/restart", methods=["POST"])
+def restart_node(node_id):
+    """Restart a node with optional improvement comments"""
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        data = request.json or {}
+        comments = data.get("comments", "")
+        
+        new_node_id = task_manager.restart_node(node_id, comments)
+        if new_node_id:
+            return jsonify({
+                "status": "restarted",
+                "old_node_id": node_id,
+                "new_node_id": new_node_id,
+                "message": "Node restarted with improvements" if comments else "Node restarted"
+            })
+        else:
+            return jsonify({"error": "Node not found or cannot be restarted"}), 400
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/node/<node_id>/remove", methods=["DELETE"])
 def remove_node(node_id):
-    """Remove a node from the task tree"""
+    """Remove a node and its entire subtree from the task tree"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500

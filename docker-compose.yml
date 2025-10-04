@@ -9,6 +9,8 @@ services:
     networks:
       - kali-net
     restart: unless-stopped
+    # Increase shared memory for parallel operations
+    shm_size: '2gb'
 
   driver:
     build: .
@@ -23,12 +25,24 @@ services:
     networks:
       - kali-net
     environment:
+      # LLM Configuration
       - MOONSHOT_API_KEY=${MOONSHOT_API_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL:-https://api.moonshot.ai/v1}
       - LLM_MODEL=${LLM_MODEL:-kimi-k2-0905-preview}
-      - AUTO_CONTINUE_DELAY=${AUTO_CONTINUE_DELAY:-10}
+      
+      # Flask Configuration
       - FLASK_ENV=development
       - FLASK_DEBUG=1
+      - AUTO_CONTINUE_DELAY=${AUTO_CONTINUE_DELAY:-10}
+      
+      # Parallel Execution Configuration (NEW)
+      - PARALLEL_ENABLED=${PARALLEL_ENABLED:-true}
+      - PARALLEL_MAX_WORKERS=${PARALLEL_MAX_WORKERS:-5}
+      - PARALLEL_MAX_LLM=${PARALLEL_MAX_LLM:-3}
+      - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-5}
+      - LLM_BASE_DELAY=${LLM_BASE_DELAY:-2}
+      - DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-90}
+      - USE_NODE_PREFIXES=${USE_NODE_PREFIXES:-true}
     ports:
       - "5000:5000"
     restart: unless-stopped
@@ -37,6 +51,15 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    # Resource limits for parallel execution
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
 
 networks:
   kali-net:

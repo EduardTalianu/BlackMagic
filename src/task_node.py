@@ -530,14 +530,25 @@ Summary?"""
         )
     
     def _collect_upper_chain_advice(self, rebranch_prompt: str) -> str:
-        """Collect advice"""
+        """Collect advice using 4-direction graph traversal"""
         parts = []
         if rebranch_prompt:
             parts.append(f"REPLANNING: {rebranch_prompt}")
         if self.node_id:
+            # Use TRM's enhanced advice method (already updated above)
             advice = self._trm.get_upper_chain_advice(self.node_id)
             if advice:
                 parts.append(advice)
+            
+            # NEW: Check for credential chains
+            cred_chain = self._trm.get_credential_chain(self.node_id)
+            if cred_chain:
+                parts.append("\n=== AVAILABLE CREDENTIALS ===")
+                for cred in cred_chain:
+                    parts.append(
+                        f"From {cred['direction']} ({cred['node_id']}): {cred['abstract']}"
+                    )
+        
         return "\n\n".join(parts)
     
     def _flush_graph(self) -> None:

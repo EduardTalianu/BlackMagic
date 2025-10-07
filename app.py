@@ -568,6 +568,146 @@ def get_file():
         return jsonify({"content": content})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    
+@app.route("/node/<node_id>/rescope", methods=["POST"])
+def rescope_node(node_id: str):
+    """
+    Re-scope: move node to different parent.
+    
+    Body: {"new_parent_id": "n123456", "reason": "Failed exploit, trying lateral movement"}
+    """
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        data = request.json
+        new_parent_id = data.get("new_parent_id")
+        reason = data.get("reason", "")
+        
+        if not new_parent_id:
+            return jsonify({"error": "new_parent_id required"}), 400
+        
+        # Get node's task_id
+        with task_manager.nodes_lock:
+            if node_id not in task_manager.nodes:
+                return jsonify({"error": "Node not found"}), 404
+            task_id = task_manager.nodes[node_id]['task_id']
+        
+        # Get TRM
+        with task_manager.trms_lock:
+            if task_id not in task_manager.trms:
+                return jsonify({"error": "Task not found"}), 404
+            trm = task_manager.trms[task_id]
+        
+        # Perform re-scope
+        trm.move_node_to_new_parent(node_id, new_parent_id, reason)
+        
+        return jsonify({
+            "status": "rescoped",
+            "node_id": node_id,
+            "new_parent_id": new_parent_id,
+            "reason": reason
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/add-variant", methods=["POST"])
+def add_variant_node(node_id: str):
+    """
+    Add variant as right sibling (A/B testing, payload variants).
+    
+    Body: {
+        "abstract": "sqlmap with tamper scripts",
+        "description": "Run sqlmap --tamper=space2comment",
+        "verification": "SQLi successful with tamper"
+    }
+    """
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        data = request.json
+        abstract = data.get("abstract")
+        description = data.get("description")
+        verification = data.get("verification")
+        
+        if not all([abstract, description, verification]):
+            return jsonify({"error": "abstract, description, verification required"}), 400
+        
+        # Get node's task_id
+        with task_manager.nodes_lock:
+            if node_id not in task_manager.nodes:
+                return jsonify({"error": "Node not found"}), 404
+            task_id = task_manager.nodes[node_id]['task_id']
+        
+        # Get TRM
+        with task_manager.trms_lock:
+            if task_id not in task_manager.trms:
+                return jsonify({"error": "Task not found"}), 404
+            trm = task_manager.trms[task_id]
+        
+        # Generate variant node ID
+        variant_node_id = trm.generate_node_id()
+        
+        # Add variant
+        trm.add_sibling_variant(node_id, variant_node_id, abstract, description)
+        
+        # Register with task manager
+        task_manager.register_node(
+            task_id=task_id,
+            node_id=variant_node_id,
+            node_info={
+                'abstract': abstract,
+                'parent_id': trm.graph.get_parent(node_id),
+                'status': 'pending'
+            }
+        )
+        
+        return jsonify({
+            "status": "variant_added",
+            "reference_node_id": node_id,
+            "variant_node_id": variant_node_id
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/credentials", methods=["GET"])
+def get_node_credentials(node_id: str):
+    """
+    Get credential chain: all previous nodes that may have credentials.
+    
+    Leverages LEFT and UP traversal to find credential sources.
+    """
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        # Get node's task_id
+        with task_manager.nodes_lock:
+            if node_id not in task_manager.nodes:
+                return jsonify({"error": "Node not found"}), 404
+            task_id = task_manager.nodes[node_id]['task_id']
+        
+        # Get TRM
+        with task_manager.trms_lock:
+            if task_id not in task_manager.trms:
+                return jsonify({"error": "Task not found"}), 404
+            trm = task_manager.trms[task_id]
+        
+        # Get credential chain
+        cred_chain = trm.get_credential_chain(node_id)
+        
+        return jsonify({
+            "node_id": node_id,
+            "credential_sources": cred_chain
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

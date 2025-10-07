@@ -1,160 +1,243 @@
 #!/usr/bin/env python3
 """
-task_relation_manager.py - Manages task graph structure and Mermaid visualization
+task_relation_manager.py - 4-direction graph with backwards compatibility
 """
 import os
 import random
 from typing import Dict, List, Optional, Set
 from threading import Lock
 
+from .graph_directions import DirectionalGraph, Direction
+
 
 class TaskRelationManager:
     """
-    Manages the hierarchical task graph structure.
-    Tracks parent-child relationships and generates Mermaid diagrams.
+    Manages hierarchical task graph using 4-direction topology.
+    Maintains backwards compatibility with old node structure.
     """
     
     def __init__(self, graph_file_path: str):
         self.graph_file_path = graph_file_path
-        self.nodes: Dict[str, dict] = {}  # node_id -> node_info
-        self.edges: List[tuple] = []  # (from_id, to_id, edge_type)
+        self.graph = DirectionalGraph()
         self.lock = Lock()
+    
+    @property
+    def nodes(self):
+        """
+        Backwards compatibility: return nodes dict with synthetic 'children' and 'parent_id'.
         
+        This allows old code like task_manager.py to continue working.
+        """
+        compatible_nodes = {}
+        
+        for node_id, metadata in self.graph.nodes.items():
+            # Get relationships from 4-direction graph
+            parent_id = self.graph.get_parent(node_id)
+            children = self.graph.get_children(node_id)
+            
+            # Synthetic node structure for backwards compatibility
+            compatible_nodes[node_id] = {
+                **metadata,  # All metadata (abstract, description, status)
+                'parent_id': parent_id,
+                'children': children
+            }
+        
+        return compatible_nodes
+    
     def generate_node_id(self) -> str:
         """Generate a unique node ID"""
         while True:
             node_id = f"n{random.randint(100000, 999999)}"
-            if node_id not in self.nodes:
+            if node_id not in self.graph.relations:
                 return node_id
     
     def add_root_node(self, node_id: str, abstract: str, description: str) -> str:
         """Add the root task node"""
         with self.lock:
-            self.nodes[node_id] = {
-                'abstract': abstract,
-                'description': description,
-                'parent_id': None,
-                'children': [],
-                'status': 'pending'
-            }
+            self.graph.add_node(
+                node_id,
+                abstract=abstract,
+                description=description,
+                status='pending'
+            )
             self._draw_graph()
             return node_id
     
     def add_sub_tasks(self, parent_node_id: str, sub_nodes: List['TaskNode']) -> None:
-        """Add sub-tasks as children of a parent node"""
+        """
+        Add sub-tasks as children using 4-direction edges.
+        
+        First child: parent --DOWN--> child1
+        Siblings:    child1 --RIGHT--> child2 --RIGHT--> child3
+        """
         with self.lock:
-            if parent_node_id not in self.nodes:
+            if parent_node_id not in self.graph.relations:
                 raise ValueError(f"Parent node {parent_node_id} not found")
             
-            parent = self.nodes[parent_node_id]
-            
             for i, sub_node in enumerate(sub_nodes):
-                # Generate node ID for sub-task
+                # Generate node ID
                 node_id = self.generate_node_id()
                 sub_node.node_id = node_id
                 
-                # Set node_id in the pydantic model
+                # Set node_id in pydantic model
                 if hasattr(sub_node.task_pydantic_model, 'node_id'):
                     sub_node.task_pydantic_model.node_id = node_id
                 if hasattr(sub_node.task_pydantic_model, 'parent_id'):
                     sub_node.task_pydantic_model.parent_id = parent_node_id
                 
-                # Add node
-                self.nodes[node_id] = {
-                    'abstract': sub_node.task_pydantic_model.abstract,
-                    'description': sub_node.task_pydantic_model.description,
-                    'parent_id': parent_node_id,
-                    'children': [],
-                    'status': 'pending'
-                }
+                # Add node to graph
+                self.graph.add_node(
+                    node_id,
+                    abstract=sub_node.task_pydantic_model.abstract,
+                    description=sub_node.task_pydantic_model.description,
+                    status='pending'
+                )
                 
-                # Add edge
+                # Add edges using 4-direction system
                 if i == 0:
                     # First child: DOWN from parent
-                    self.edges.append((parent_node_id, node_id, 'DOWN'))
+                    self.graph.add_edge(parent_node_id, Direction.DOWN, node_id)
                 else:
                     # Subsequent children: RIGHT from previous sibling
                     prev_node_id = sub_nodes[i-1].node_id
-                    self.edges.append((prev_node_id, node_id, 'RIGHT'))
-                
-                parent['children'].append(node_id)
+                    self.graph.add_edge(prev_node_id, Direction.RIGHT, node_id)
             
             self._draw_graph()
     
     def update_node_status(self, node_id: str, status: str) -> None:
         """Update the status of a node"""
         with self.lock:
-            if node_id in self.nodes:
-                self.nodes[node_id]['status'] = status
-                self._draw_graph()
+            self.graph.update_node_metadata(node_id, status=status)
+            self._draw_graph()
     
     def remove_node(self, node_id: str) -> None:
-        """Remove a node and its sub-graph (when task is impossible)"""
+        """Remove a node and its entire subtree"""
         with self.lock:
-            if node_id not in self.nodes:
-                return
-            
-            # Recursively remove children
-            children = self.nodes[node_id].get('children', [])
-            for child_id in children:
-                self.remove_node(child_id)
-            
-            # Remove edges involving this node
-            self.edges = [(f, t, e) for f, t, e in self.edges 
-                         if f != node_id and t != node_id]
-            
-            # Remove from parent's children list
-            parent_id = self.nodes[node_id].get('parent_id')
-            if parent_id and parent_id in self.nodes:
-                self.nodes[parent_id]['children'].remove(node_id)
-            
-            # Remove the node
-            del self.nodes[node_id]
-            
+            self.graph.remove_subtree(node_id)
             self._draw_graph()
     
     def get_upper_chain_advice(self, node_id: str) -> str:
         """
-        Collect advice from parent and left siblings.
-        Returns a summary of what has been done so far.
+        Collect advice from ancestors (UP chain) and previous siblings (LEFT chain).
         """
         with self.lock:
-            if node_id not in self.nodes:
+            if node_id not in self.graph.relations:
                 return ""
             
             advice_parts = []
-            node = self.nodes[node_id]
             
-            # Get parent context
-            parent_id = node.get('parent_id')
-            if parent_id and parent_id in self.nodes:
-                parent = self.nodes[parent_id]
-                advice_parts.append(f"Parent task: {parent['abstract']}")
-            
-            # Get left siblings (previous steps in the chain)
+            # Get parent context (immediate parent only for simplicity)
+            parent_id = self.graph.get_parent(node_id)
             if parent_id:
-                siblings = self.nodes[parent_id].get('children', [])
-                node_index = siblings.index(node_id) if node_id in siblings else -1
-                
-                if node_index > 0:
-                    advice_parts.append("Previous steps completed:")
-                    for i in range(node_index):
-                        sibling_id = siblings[i]
-                        sibling = self.nodes[sibling_id]
-                        advice_parts.append(f"  - {sibling['abstract']} ({sibling['status']})")
+                metadata = self.graph.get_node_metadata(parent_id)
+                advice_parts.append(f"Parent task: {metadata.get('abstract', 'N/A')}")
+            
+            # Get previous siblings (LEFT chain)
+            prev_siblings = self.graph.get_prev_siblings(node_id)
+            if prev_siblings:
+                advice_parts.append("Previous steps completed:")
+                for sibling_id in reversed(prev_siblings):  # Oldest to newest
+                    metadata = self.graph.get_node_metadata(sibling_id)
+                    advice_parts.append(
+                        f"  - {metadata.get('abstract', 'N/A')} ({metadata.get('status', 'unknown')})"
+                    )
             
             return "\n".join(advice_parts)
     
+    def move_node_to_new_parent(
+        self, 
+        node_id: str, 
+        new_parent_id: str,
+        reason: str = ""
+    ) -> None:
+        """
+        Re-scope operation: move node to different parent.
+        
+        Example: Failed exploit → jump back to recon parent for lateral movement
+        """
+        with self.lock:
+            # Update metadata with reason
+            if reason:
+                metadata = self.graph.get_node_metadata(node_id)
+                abstract = metadata.get('abstract', '')
+                self.graph.update_node_metadata(
+                    node_id,
+                    abstract=f"{abstract} [Re-scoped: {reason}]"
+                )
+            
+            # Perform move
+            self.graph.move_node(node_id, new_parent_id, position='last')
+            self._draw_graph()
+    
+    def add_sibling_variant(
+        self,
+        reference_node_id: str,
+        variant_node_id: str,
+        abstract: str,
+        description: str
+    ) -> None:
+        """
+        Add variant node as right sibling (A/B testing, payload variants).
+        
+        Example: sqlmap-plain --RIGHT--> sqlmap-tamper
+        """
+        with self.lock:
+            # Add new node
+            self.graph.add_node(
+                variant_node_id,
+                abstract=abstract,
+                description=description,
+                status='pending'
+            )
+            
+            # Insert as right sibling
+            self.graph.add_edge(reference_node_id, Direction.RIGHT, variant_node_id)
+            self._draw_graph()
+    
+    def get_credential_chain(self, node_id: str) -> List[dict]:
+        """
+        Find all previous nodes that may have cracked credentials.
+        
+        Traverses LEFT (siblings) then UP (ancestors) to collect credential sources.
+        """
+        with self.lock:
+            credential_nodes = []
+            
+            # Check previous siblings
+            prev_siblings = self.graph.get_prev_siblings(node_id)
+            for sibling_id in prev_siblings:
+                metadata = self.graph.get_node_metadata(sibling_id)
+                abstract = metadata.get('abstract', '').lower()
+                if any(kw in abstract for kw in ['crack', 'hash', 'password', 'credential']):
+                    credential_nodes.append({
+                        'node_id': sibling_id,
+                        'abstract': metadata.get('abstract'),
+                        'direction': 'LEFT'
+                    })
+            
+            # Check ancestors
+            ancestors = self.graph.get_ancestors(node_id)
+            for ancestor_id in ancestors:
+                metadata = self.graph.get_node_metadata(ancestor_id)
+                abstract = metadata.get('abstract', '').lower()
+                if any(kw in abstract for kw in ['crack', 'hash', 'password', 'credential']):
+                    credential_nodes.append({
+                        'node_id': ancestor_id,
+                        'abstract': metadata.get('abstract'),
+                        'direction': 'UP'
+                    })
+            
+            return credential_nodes
+    
     def _draw_graph(self) -> None:
-        """Generate Mermaid diagram and write to file with better dark mode colors"""
+        """Generate Mermaid diagram from 4-direction graph"""
         lines = ["graph TD"]
         
-        # Add nodes with better readability
-        for node_id, node_info in self.nodes.items():
-            abstract = node_info['abstract'][:50]  # Truncate for readability
-            status = node_info['status']
+        # Add all nodes
+        for node_id, metadata in self.graph.nodes.items():
+            abstract = metadata.get('abstract', 'N/A')[:50]
+            status = metadata.get('status', 'pending')
             
-            # Better emoji and status indicators
             status_icon = {
                 'pending': '⏳',
                 'planning': '🧠',
@@ -165,19 +248,23 @@ class TaskRelationManager:
                 'impossible': '⛔'
             }.get(status, '◯')
             
-            # Escape special characters for Mermaid
-            label = f"{status_icon} {abstract}"
-            label = label.replace('"', "'")  # Replace quotes to avoid breaking Mermaid
+            label = f"{status_icon} {abstract}".replace('"', "'")
             lines.append(f'    {node_id}["{label}"]')
         
-        # Add edges with better styling
-        for from_id, to_id, edge_type in self.edges:
-            if edge_type == 'DOWN':
-                lines.append(f'    {from_id} --> {to_id}')
-            elif edge_type == 'RIGHT':
-                lines.append(f'    {from_id} -.-> {to_id}')
+        # Add edges (only DOWN and RIGHT for visual clarity)
+        # UP and LEFT are implicit reverse edges
+        for node_id in self.graph.relations:
+            # DOWN edges (parent → child)
+            child = self.graph.get_neighbor(node_id, Direction.DOWN)
+            if child:
+                lines.append(f'    {node_id} --> {child}')
+            
+            # RIGHT edges (sibling → sibling)
+            right = self.graph.get_neighbor(node_id, Direction.RIGHT)
+            if right:
+                lines.append(f'    {node_id} -.-> {right}')
         
-        # Add enhanced styling for dark mode with better contrast
+        # Enhanced styling
         lines.extend([
             '',
             '    %% Enhanced styling for dark mode',
@@ -190,23 +277,10 @@ class TaskRelationManager:
             '    classDef pending fill:#37474f,stroke:#607d8b,stroke-width:2px,color:#e0e0e0',
         ])
         
-        # Apply styles to nodes
-        for node_id, node_info in self.nodes.items():
-            status = node_info['status']
-            if status == 'completed':
-                lines.append(f'    class {node_id} completed')
-            elif status == 'working':
-                lines.append(f'    class {node_id} working')
-            elif status == 'planning':
-                lines.append(f'    class {node_id} planning')
-            elif status == 'failed':
-                lines.append(f'    class {node_id} failed')
-            elif status == 'cancelled':
-                lines.append(f'    class {node_id} cancelled')
-            elif status == 'impossible':
-                lines.append(f'    class {node_id} impossible')
-            else:
-                lines.append(f'    class {node_id} pending')
+        # Apply styles
+        for node_id, metadata in self.graph.nodes.items():
+            status = metadata.get('status', 'pending')
+            lines.append(f'    class {node_id} {status}')
         
         # Write to file
         mermaid_content = '\n'.join(lines)
@@ -214,7 +288,7 @@ class TaskRelationManager:
             f.write(mermaid_content)
     
     def get_graph_content(self) -> str:
-        """Read and return the current graph content"""
+        """Read and return current graph content"""
         try:
             with open(self.graph_file_path, 'r') as f:
                 return f.read()

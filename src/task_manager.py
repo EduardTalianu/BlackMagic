@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-task_manager.py - Fixed status synchronization and added node force start/restart
+task_manager.py - Task orchestration with 4-direction graph support and node logging
 """
 import os
 import uuid
@@ -73,7 +73,14 @@ class NodeLogger:
 
 class TaskManager:
     """
-    Global task manager with fixed status synchronization
+    Global task manager with 4-direction graph support and comprehensive node tracking.
+    
+    Responsibilities:
+    - Create and track tasks
+    - Manage background execution threads
+    - Coordinate between TaskNodes and TaskRelationManager
+    - Provide node-level logging
+    - Synchronize status between execution and visualization layers
     """
     
     def __init__(
@@ -91,20 +98,28 @@ class TaskManager:
         self.work_dir = work_dir
         self.log_dir = os.path.join(os.path.dirname(work_dir), 'logs')
         
-        # Task storage
+        # Task storage: task_id -> task info
         self.tasks: Dict[str, dict] = {}
+        
+        # Node storage: node_id -> node state (source of truth for status)
         self.nodes: Dict[str, dict] = {}
         self.nodes_lock = Lock()
+        
+        # TaskRelationManager instances: task_id -> TRM
         self.trms: Dict[str, TaskRelationManager] = {}
         self.trms_lock = Lock()
+        
+        # Node loggers: node_id -> NodeLogger
         self.loggers: Dict[str, NodeLogger] = {}
         self.loggers_lock = Lock()
         
         # Thread pool for background execution
         self.executor = ThreadPoolExecutor(max_workers=10)
         
+        # Ensure directories exist
         os.makedirs(work_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.log_dir, 'nodes'), exist_ok=True)
     
     def create_task(self, task: TaskModel) -> str:
         """Create new task and spawn background worker"""
@@ -169,9 +184,15 @@ class TaskManager:
         }
     
     def list_all_tasks(self) -> list:
-        """List all tasks and nodes with correct status from self.nodes"""
+        """
+        List all tasks and nodes with correct status.
+        
+        Returns list of dicts containing both root tasks and their nodes.
+        Nodes are retrieved from self.nodes (source of truth for status).
+        """
         result = []
         
+        # Add root tasks
         for task_id, info in self.tasks.items():
             result.append({
                 'type': 'root',
@@ -183,7 +204,7 @@ class TaskManager:
                 'is_restartable': info['status'] in [TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.IMPOSSIBLE]
             })
             
-            # Get nodes from self.nodes (which has the correct status) instead of TRM
+            # Get nodes from self.nodes (source of truth for status)
             with self.nodes_lock:
                 task_nodes = {nid: ndata for nid, ndata in self.nodes.items() 
                              if ndata.get('task_id') == task_id}
@@ -205,10 +226,14 @@ class TaskManager:
         return result
     
     def get_task_nodes(self, task_id: str) -> List[dict]:
-        """Get hierarchical list of all nodes for a task"""
+        """
+        Get hierarchical list of all nodes for a task.
+        
+        Uses TRM for structure, self.nodes for actual status.
+        """
         nodes_list = []
         
-        # Build map from self.nodes for correct status
+        # Build status map from self.nodes (source of truth)
         with self.nodes_lock:
             node_status_map = {nid: ndata for nid, ndata in self.nodes.items() 
                               if ndata.get('task_id') == task_id}
@@ -218,41 +243,45 @@ class TaskManager:
                 return nodes_list
             
             trm = self.trms[task_id]
-            with trm.lock:
-                # Build tree structure
-                def add_node_recursive(node_id: str, depth: int = 0):
-                    if node_id not in trm.nodes:
-                        return
-                    
-                    trm_node_data = trm.nodes[node_id]
-                    
-                    # Get actual status from self.nodes
-                    actual_status = 'unknown'
-                    if node_id in node_status_map:
-                        actual_status = node_status_map[node_id].get('status', 'unknown')
-                    
-                    nodes_list.append({
-                        'node_id': node_id,
-                        'abstract': trm_node_data.get('abstract', 'N/A'),
-                        'status': actual_status,  # Use actual status from self.nodes
-                        'depth': depth,
-                        'parent_id': trm_node_data.get('parent_id'),
-                        'children': trm_node_data.get('children', [])
-                    })
-                    
-                    # Add children
-                    for child_id in trm_node_data.get('children', []):
-                        add_node_recursive(child_id, depth + 1)
+            
+            # Access TRM nodes via backwards-compatible property
+            # This returns synthetic nodes with parent_id and children from 4-direction graph
+            trm_nodes = trm.nodes
+            
+            # Build tree structure recursively
+            def add_node_recursive(node_id: str, depth: int = 0):
+                if node_id not in trm_nodes:
+                    return
                 
-                # Find root node
-                root_node_id = None
-                for nid, ndata in trm.nodes.items():
-                    if ndata.get('parent_id') is None:
-                        root_node_id = nid
-                        break
+                trm_node_data = trm_nodes[node_id]
                 
-                if root_node_id:
-                    add_node_recursive(root_node_id)
+                # Get actual status from self.nodes (source of truth)
+                actual_status = 'unknown'
+                if node_id in node_status_map:
+                    actual_status = node_status_map[node_id].get('status', 'unknown')
+                
+                nodes_list.append({
+                    'node_id': node_id,
+                    'abstract': trm_node_data.get('abstract', 'N/A'),
+                    'status': actual_status,
+                    'depth': depth,
+                    'parent_id': trm_node_data.get('parent_id'),
+                    'children': trm_node_data.get('children', [])
+                })
+                
+                # Add children recursively
+                for child_id in trm_node_data.get('children', []):
+                    add_node_recursive(child_id, depth + 1)
+            
+            # Find root node (node with no parent)
+            root_node_id = None
+            for nid, ndata in trm_nodes.items():
+                if ndata.get('parent_id') is None:
+                    root_node_id = nid
+                    break
+            
+            if root_node_id:
+                add_node_recursive(root_node_id)
         
         return nodes_list
     
@@ -324,7 +353,14 @@ class TaskManager:
         return new_task_id
     
     def register_node(self, task_id: str, node_id: str, node_info: dict):
-        """Register a node and create its logger"""
+        """
+        Register a node and create its logger.
+        
+        This is called when a TaskNode is created and initializes:
+        1. Node state in self.nodes (status, output buffers, etc.)
+        2. NodeLogger for file-based logging
+        3. Root node reference in task if applicable
+        """
         with self.nodes_lock:
             self.nodes[node_id] = {
                 'task_id': task_id,
@@ -355,22 +391,28 @@ class TaskManager:
                 'created_at': datetime.now().isoformat()
             }
             logger._ensure_initialized(metadata)
+            
+            print(f"[TaskManager] Created logger for {node_id} at: {logger.log_path}")
         
-        # Store root_node_id in task if this is root
+        # Store root_node_id in task if this is root (no parent)
         if node_info.get('parent_id') is None:
             if task_id in self.tasks:
                 self.tasks[task_id]['root_node_id'] = node_id
         
-        # Sync status to TRM
+        # Sync status to TRM for graph visualization
         self._sync_status_to_trm(node_id, 'pending')
     
     def register_trm(self, task_id: str, trm: TaskRelationManager):
-        """Register TRM instance"""
+        """Register TRM instance for a task"""
         with self.trms_lock:
             self.trms[task_id] = trm
     
     def update_node_status(self, node_id: str, status: str, error: str = None):
-        """Update node status and sync to TRM"""
+        """
+        Update node status and sync to TRM.
+        
+        This is the primary method for updating node state during execution.
+        """
         with self.nodes_lock:
             if node_id in self.nodes:
                 self.nodes[node_id]['status'] = status
@@ -383,7 +425,11 @@ class TaskManager:
         self._sync_status_to_trm(node_id, status)
     
     def _sync_status_to_trm(self, node_id: str, status: str):
-        """Sync status from self.nodes to TRM for graph updates"""
+        """
+        Sync status from self.nodes to TRM for graph updates.
+        
+        This keeps the Mermaid graph in sync with actual execution state.
+        """
         with self.nodes_lock:
             if node_id not in self.nodes:
                 return
@@ -424,7 +470,12 @@ class TaskManager:
         return False
     
     def force_start_node(self, node_id: str) -> bool:
-        """Force start a pending or cancelled node"""
+        """
+        Force start a pending or cancelled node.
+        
+        Note: This is a simplified implementation. In production, you would need
+        to properly reconstruct the execution context and submit to thread pool.
+        """
         with self.nodes_lock:
             if node_id not in self.nodes:
                 return False
@@ -443,14 +494,15 @@ class TaskManager:
             # Sync to TRM
             self._sync_status_to_trm(node_id, 'working')
         
-        # Start execution in background
-        # Note: This is a simplified version - in production you'd need to
-        # properly reconstruct the execution context
         print(f"[TaskManager] Force starting node {node_id}")
         return True
     
     def restart_node(self, node_id: str, comments: str = "") -> Optional[str]:
-        """Restart a node with optional improvement comments"""
+        """
+        Restart a node with optional improvement comments.
+        
+        Creates a new node as a sibling with improved description.
+        """
         with self.nodes_lock:
             if node_id not in self.nodes:
                 return None
@@ -482,21 +534,21 @@ class TaskManager:
                 'status': 'pending'
             })
             
-            # Add to TRM
-            with trm.lock:
-                trm.nodes[new_node_id] = {
-                    'abstract': new_abstract,
-                    'description': comments if comments else "Restarted node",
-                    'parent_id': parent_id,
-                    'children': [],
-                    'status': 'pending'
-                }
-                
-                # Add to parent's children if there is a parent
-                if parent_id and parent_id in trm.nodes:
-                    trm.nodes[parent_id]['children'].append(new_node_id)
-                
-                trm._draw_graph()
+            # Add to TRM using 4-direction graph
+            from .graph_directions import Direction
+            
+            # Add as right sibling of failed node
+            trm.graph.add_node(
+                new_node_id,
+                abstract=new_abstract,
+                description=comments if comments else "Restarted node",
+                status='pending'
+            )
+            
+            # Link as right sibling
+            trm.graph.add_edge(node_id, Direction.RIGHT, new_node_id)
+            
+            trm._draw_graph()
         
         return new_node_id
     
@@ -515,13 +567,10 @@ class TaskManager:
         with self.trms_lock:
             if task_id in self.trms:
                 trm = self.trms[task_id]
-                with trm.lock:
-                    def collect_descendants(nid):
-                        if nid in trm.nodes:
-                            descendants.append(nid)
-                            for child_id in trm.nodes[nid].get('children', []):
-                                collect_descendants(child_id)
-                    collect_descendants(node_id)
+                # Use 4-direction graph to get descendants
+                descendants_set = trm.graph.get_descendants(node_id)
+                descendants = list(descendants_set)
+                descendants.append(node_id)  # Include self
         
         # Cancel and remove all descendants
         for nid in descendants:
@@ -530,12 +579,11 @@ class TaskManager:
                 if nid in self.nodes:
                     del self.nodes[nid]
         
-        # Remove from TRM
+        # Remove from TRM using 4-direction graph
         with self.trms_lock:
             if task_id in self.trms:
                 trm = self.trms[task_id]
-                for nid in descendants:
-                    trm.remove_node(nid)
+                trm.remove_node(node_id)
         
         return True
     
@@ -547,7 +595,13 @@ class TaskManager:
         return False
     
     def get_node_output_callback(self, node_id: str):
-        """Get output callback for a node - writes to both memory and log file"""
+        """
+        Get output callback for a node.
+        
+        Returns a callback function that writes to both:
+        1. Memory (self.nodes[node_id]['terminal_output'] / 'llm_responses')
+        2. Log file (via NodeLogger)
+        """
         def callback(output_type, content):
             # Write to memory
             with self.nodes_lock:
@@ -608,7 +662,12 @@ class TaskManager:
         return None
     
     def _run_background_task(self, task_id: str):
-        """Background worker that executes the task tree"""
+        """
+        Background worker that executes the task tree.
+        
+        This runs in a separate thread and manages the entire lifecycle
+        of a task from planning through execution to completion.
+        """
         task_info = self.tasks[task_id]
         
         try:
@@ -616,7 +675,7 @@ class TaskManager:
             
             task_info['status'] = TaskStatus.PLANNING
             
-            # Create TRM
+            # Create TRM with 4-direction graph support
             trm = TaskRelationManager(task_info['graph_file'])
             self.register_trm(task_id, trm)
             
@@ -693,14 +752,14 @@ class TaskManager:
             print(f"[{task_id}] ========== TASK CANCELLED ==========")
     
     def _log_message(self, task_id: str, message: str):
-        """Log debug messages"""
+        """Log debug messages to task-level log file"""
         log_file = os.path.join(self.work_dir, f"{task_id}.log")
         with open(log_file, 'a') as f:
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"[{timestamp}] {message}\n")
     
     def _log_install(self, tool_name: str):
-        """Log tool installations"""
+        """Log tool installations to shared install log"""
         install_log = os.path.join(self.log_dir, "install.log")
         os.makedirs(os.path.dirname(install_log), exist_ok=True)
         with open(install_log, 'a') as f:

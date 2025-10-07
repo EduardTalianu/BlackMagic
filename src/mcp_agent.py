@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-mcp_agent.py - MCP Agent with stuck-loop detection and better feedback
+mcp_agent.py - MCP Agent with configurable execution limits and timeouts
 """
 import docker
 import re
 import requests
+import time
 from typing import Tuple
 from threading import Lock
 from .task_models import TaskModel
@@ -12,8 +13,7 @@ from .task_models import TaskModel
 
 class MCPAgent:
     """
-    Thread-safe agent that executes tasks in Kali container.
-    Detects and breaks infinite loops, provides feedback on empty commands.
+    Thread-safe agent with configurable kill-switches and command timeouts.
     """
     
     # Class-level lock for Docker client creation (singleton pattern)
@@ -49,11 +49,20 @@ class MCPAgent:
         
         # Instance-level lock for this agent's operations
         self._lock = Lock()
+        
+        # Import limits dynamically to avoid circular imports
+        from .execution_limits import get_limits, get_metrics
+        self.limits = get_limits()
+        self.metrics = get_metrics()
     
     def execute_task(self, task: TaskModel, system_prompt: str) -> str:
         """
-        Execute a task by having an LLM conversation with command execution.
-        Includes stuck-loop detection and better feedback.
+        Execute a task with configurable iteration limit and stuck-loop detection.
+        
+        Kill-switches:
+        1. Max iterations (default: 20)
+        2. Empty output threshold (default: 5 consecutive)
+        3. Comment-only threshold (default: 5 consecutive)
         """
         conversation = [
             {"role": "system", "content": system_prompt},
@@ -61,9 +70,12 @@ class MCPAgent:
         ]
         
         all_output = []
-        max_iterations = 20
-        empty_output_count = 0      # Track consecutive empty outputs
-        comment_only_count = 0       # Track consecutive comment-only commands
+        max_iterations = self.limits.mcp_max_iterations
+        empty_threshold = self.limits.mcp_empty_output_threshold
+        comment_threshold = self.limits.mcp_comment_only_threshold
+        
+        empty_output_count = 0
+        comment_only_count = 0
         
         for iteration in range(max_iterations):
             # Get next command from LLM
@@ -83,45 +95,31 @@ class MCPAgent:
                     self.output_callback('terminal', done_msg)
                 break
             
-            # Detect comment-only commands (bash comments that do nothing)
+            # Detect comment-only commands
             if self._is_comment_only(cmd):
                 comment_only_count += 1
                 
-                # Provide feedback to LLM
-                feedback = "[SYSTEM] Your last output was only a comment. Please provide an actual command to execute, or respond with 'DONE: reason' if the task cannot be completed."
+                feedback = f"[SYSTEM] Your last output was only a comment. Please provide an actual command to execute, or respond with 'DONE: reason' if the task cannot be completed."
                 
-                if comment_only_count >= 3:
-                    feedback = "[SYSTEM] WARNING: You've provided 3 consecutive comments with no actual commands. If you cannot proceed (e.g., missing API keys, tools not available), respond with 'DONE: Unable to complete - reason' to end this task."
-                
-                if comment_only_count >= 5:
-                    # Force termination
-                    stuck_msg = "\n[SYSTEM] Task terminated - stuck in comment-only loop. No meaningful commands executed after 5 attempts.\n"
+                if comment_only_count >= comment_threshold:
+                    self.metrics.increment('mcp_comment_loops')
+                    stuck_msg = f"\n[SYSTEM] Task terminated - stuck in comment-only loop after {comment_threshold} attempts.\n"
                     all_output.append(stuck_msg)
                     if self.output_callback:
                         self.output_callback('terminal', stuck_msg)
-                    conversation.append({
-                        "role": "user",
-                        "content": stuck_msg
-                    })
+                    conversation.append({"role": "user", "content": stuck_msg})
                     break
                 
-                # Add feedback to conversation
-                conversation.append({
-                    "role": "user",
-                    "content": feedback
-                })
-                
-                # Log the feedback
+                conversation.append({"role": "user", "content": feedback})
                 terminal_output = f"$ {cmd}\n{feedback}\n"
                 all_output.append(terminal_output)
                 if self.output_callback:
                     self.output_callback('terminal', terminal_output)
-                
                 continue
             else:
-                comment_only_count = 0  # Reset if real command executed
+                comment_only_count = 0
             
-            # Execute command
+            # Execute command with timeout
             output, _ = self._kali_exec(cmd)
             terminal_output = f"$ {cmd}\n{output}\n"
             all_output.append(terminal_output)
@@ -132,17 +130,13 @@ class MCPAgent:
             else:
                 empty_output_count = 0
             
-            # Break if stuck (5 consecutive empty outputs)
-            if empty_output_count >= 5:
-                stuck_msg = "\n[SYSTEM] Task appears stuck - no meaningful output after 5 iterations. If you cannot make progress, respond with 'DONE: Unable to complete - reason'.\n"
+            # Break if stuck (consecutive empty outputs)
+            if empty_output_count >= empty_threshold:
+                stuck_msg = f"\n[SYSTEM] Task appears stuck - no meaningful output after {empty_threshold} iterations. If you cannot make progress, respond with 'DONE: Unable to complete - reason'.\n"
                 all_output.append(stuck_msg)
                 if self.output_callback:
                     self.output_callback('terminal', stuck_msg)
-                conversation.append({
-                    "role": "user",
-                    "content": stuck_msg
-                })
-                # Give LLM one more chance to say DONE
+                conversation.append({"role": "user", "content": stuck_msg})
                 empty_output_count = 0
             
             # Log terminal output
@@ -150,13 +144,11 @@ class MCPAgent:
                 self.output_callback('terminal', terminal_output)
             
             # Add output to conversation
-            conversation.append({
-                "role": "user",
-                "content": f"Command output:\n{output}"
-            })
+            conversation.append({"role": "user", "content": f"Command output:\n{output}"})
         
-        # If we hit max iterations without DONE
+        # If we hit max iterations
         if iteration >= max_iterations - 1:
+            self.metrics.increment('mcp_iteration_limits')
             timeout_msg = f"\n[SYSTEM] Reached maximum iteration limit ({max_iterations}). Task incomplete.\n"
             all_output.append(timeout_msg)
             if self.output_callback:
@@ -165,27 +157,20 @@ class MCPAgent:
         return "\n".join(all_output)
     
     def _is_comment_only(self, cmd: str) -> bool:
-        """
-        Check if command is only comments (no actual executable code).
-        Returns True if command is just bash comments.
-        """
-        # Remove all comments and whitespace
+        """Check if command is only comments (no actual executable code)"""
         lines = cmd.strip().split('\n')
         non_comment_lines = [
             line.strip() 
             for line in lines 
             if line.strip() and not line.strip().startswith('#')
         ]
-        
-        # If no non-comment lines, it's comment-only
         return len(non_comment_lines) == 0
     
     def _llm_next_command(self, conversation_history: list) -> str:
-        """Get next command from LLM with retry logic"""
-        import time
-        
-        max_retries = 5
-        base_delay = 2
+        """Get next command from LLM with configurable retry logic"""
+        max_retries = self.limits.llm_max_retries
+        base_delay = self.limits.llm_base_delay
+        timeout = self.limits.llm_call_timeout
         
         for attempt in range(max_retries):
             try:
@@ -200,7 +185,12 @@ class MCPAgent:
                     "Content-Type": "application/json"
                 }
                 
-                response = requests.post(self.llm_url, headers=headers, json=payload, timeout=90)
+                response = requests.post(
+                    self.llm_url, 
+                    headers=headers, 
+                    json=payload, 
+                    timeout=timeout
+                )
                 response.raise_for_status()
                 
                 raw_response = response.json()["choices"][0]["message"]["content"].strip()
@@ -208,7 +198,6 @@ class MCPAgent:
                 if self.log_callback:
                     self.log_callback(f"LLM RAW: {raw_response}")
                 
-                # Extract actual command
                 command = self._extract_command(raw_response)
                 
                 if self.log_callback:
@@ -218,6 +207,7 @@ class MCPAgent:
                 
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 429:
+                    self.metrics.increment('llm_rate_limits')
                     if attempt < max_retries - 1:
                         delay = base_delay * (2 ** attempt)
                         print(f"[MCP LLM] Rate limited (429). Retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
@@ -226,18 +216,23 @@ class MCPAgent:
                         time.sleep(delay)
                         continue
                     else:
+                        self.metrics.increment('llm_failures')
                         raise RuntimeError(f"Failed after {max_retries} attempts due to rate limiting")
                 else:
+                    self.metrics.increment('llm_failures')
                     raise RuntimeError(f"LLM API error: {e}")
-            except requests.exceptions.RequestException as e:
+                    
+            except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
                 if attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
                     print(f"[MCP LLM] Request failed: {e}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
                     time.sleep(delay)
                     continue
                 else:
+                    self.metrics.increment('llm_failures')
                     raise RuntimeError(f"Failed to call LLM API after {max_retries} attempts: {e}")
         
+        self.metrics.increment('llm_failures')
         raise RuntimeError("Exhausted all retry attempts")
     
     def _extract_command(self, response: str) -> str:
@@ -274,7 +269,9 @@ class MCPAgent:
     
     def _kali_exec(self, cmd: str) -> Tuple[str, bool]:
         """
-        Execute command in Kali container (thread-safe).
+        Execute command in Kali container with configurable timeout.
+        
+        Kill-switch: Command timeout (default: 300s)
         """
         with self._lock:
             try:
@@ -285,15 +282,57 @@ class MCPAgent:
             except Exception as e:
                 return f"Error: Failed to connect to container: {e}", False
             
-            # Execute command
+            # Execute command with timeout
+            start_time = time.time()
+            timeout = self.limits.docker_exec_timeout
+            
             try:
-                raw = container.exec_run(
+                # Create exec instance
+                exec_id = container.client.api.exec_create(
+                    container.id,
                     ["/bin/bash", "-c", cmd],
                     tty=False,
                     stderr=True,
                     stdout=True
                 )
-                output = raw.output.decode(errors="ignore")
+                
+                # Start execution
+                exec_stream = container.client.api.exec_start(
+                    exec_id['Id'],
+                    stream=True,
+                    demux=False
+                )
+                
+                # Collect output with timeout
+                output_chunks = []
+                for chunk in exec_stream:
+                    output_chunks.append(chunk)
+                    
+                    elapsed = time.time() - start_time
+                    
+                    # Log slow commands
+                    if self.limits.log_slow_commands and elapsed > (timeout * 0.5):
+                        if self.log_callback:
+                            self.log_callback(f"SLOW COMMAND: {cmd[:100]} - {elapsed:.1f}s elapsed")
+                        self.metrics.increment('docker_slow_commands')
+                    
+                    # Check timeout
+                    if elapsed > timeout:
+                        self.metrics.increment('docker_timeouts')
+                        timeout_msg = f"\n[TIMEOUT] Command exceeded {timeout}s limit and was interrupted.\n"
+                        output_chunks.append(timeout_msg.encode())
+                        
+                        if self.limits.docker_kill_on_timeout:
+                            # DANGEROUS: Kill the exec process
+                            try:
+                                container.client.api.exec_stop(exec_id['Id'])
+                            except:
+                                pass
+                        
+                        break
+                
+                output = b''.join(output_chunks).decode(errors="ignore")
+                
             except Exception as e:
                 return f"Error executing command: {e}", False
             
@@ -305,11 +344,9 @@ class MCPAgent:
                 if match:
                     missing_tool = match.group(1)
                     
-                    # Log the installation
                     if self.install_log_callback:
                         self.install_log_callback(missing_tool)
                     
-                    # Try to install the missing tool
                     install_cmd = f"apt-get update && apt-get install -y {missing_tool}"
                     
                     try:
@@ -320,11 +357,9 @@ class MCPAgent:
                             stdout=True
                         )
                         
-                        # Check if installation was successful
                         if install_result.exit_code == 0:
                             tool_installed = True
                             
-                            # Re-run original command
                             raw = container.exec_run(
                                 ["/bin/bash", "-c", cmd],
                                 tty=False,
@@ -380,9 +415,7 @@ class MCPAgent:
                 "id": container.short_id
             }
         except Exception as e:
-            return {
-                "error": str(e)
-            }
+            return {"error": str(e)}
     
     def execute_single_command(self, cmd: str) -> str:
         """Execute a single command without LLM interaction"""

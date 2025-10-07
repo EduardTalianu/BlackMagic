@@ -98,6 +98,10 @@ class TaskManager:
         self.work_dir = work_dir
         self.log_dir = os.path.join(os.path.dirname(work_dir), 'logs')
         
+        # Import execution limits
+        from .execution_limits import get_limits
+        self.limits = get_limits()
+        
         # Task storage: task_id -> task info
         self.tasks: Dict[str, dict] = {}
         
@@ -113,13 +117,78 @@ class TaskManager:
         self.loggers: Dict[str, NodeLogger] = {}
         self.loggers_lock = Lock()
         
-        # Thread pool for background execution
-        self.executor = ThreadPoolExecutor(max_workers=10)
+        # Thread pool with configurable size
+        max_workers = self.limits.max_concurrent_tasks
+        print(f"[TaskManager] Initializing ThreadPoolExecutor with {max_workers} workers")
+        self.executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="TaskManager"
+        )
         
         # Ensure directories exist
         os.makedirs(work_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
         os.makedirs(os.path.join(self.log_dir, 'nodes'), exist_ok=True)
+        
+        # Create MCP client (will be used for container health checks)
+        self.mcp_client = MCPAgent(
+            container_name=container_name,
+            llm_url=llm_url,
+            llm_key=llm_key,
+            model=model
+        )
+        
+        print(f"[TaskManager] ✓ Initialized with execution limits:")
+        print(self.limits)
+
+
+    # Add method to check if cancellation should be checked:
+
+    def should_check_cancellation(self, last_check_time: float) -> bool:
+        """
+        Determine if it's time to check cancellation flag.
+        
+        Args:
+            last_check_time: Unix timestamp of last check
+        
+        Returns:
+            True if interval has elapsed
+        """
+        import time
+        current_time = time.time()
+        interval = self.limits.cancellation_check_interval
+        return (current_time - last_check_time) >= interval
+
+
+    # Add method to get executor status:
+
+    def get_executor_status(self) -> dict:
+        """Get current thread pool executor status"""
+        import threading
+        
+        active_threads = sum(1 for t in threading.enumerate() 
+                            if t.name.startswith('TaskManager'))
+        
+        from .task_models import TaskStatus
+        
+        return {
+            'max_workers': self.limits.max_concurrent_tasks,
+            'active_threads': active_threads,
+            'tasks': {
+                'total': len(self.tasks),
+                'pending': sum(1 for t in self.tasks.values() 
+                            if t['status'] == TaskStatus.PENDING),
+                'working': sum(1 for t in self.tasks.values() 
+                            if t['status'] in [TaskStatus.PLANNING, TaskStatus.WORKING]),
+                'completed': sum(1 for t in self.tasks.values() 
+                                if t['status'] == TaskStatus.COMPLETED),
+                'failed': sum(1 for t in self.tasks.values() 
+                            if t['status'] in [TaskStatus.FAILED, TaskStatus.IMPOSSIBLE]),
+                'cancelled': sum(1 for t in self.tasks.values() 
+                                if t['status'] == TaskStatus.CANCELLED)
+            }
+        }
+
     
     def create_task(self, task: TaskModel) -> str:
         """Create new task and spawn background worker"""

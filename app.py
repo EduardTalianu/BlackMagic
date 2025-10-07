@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-app.py - Task management API with 4-direction graph support and automatic status reconciliation
+app.py - Task management API with 4-direction graph support, automatic status reconciliation,
+and configurable execution limits
 """
 import os
 import docker
@@ -17,6 +18,10 @@ try:
     from src.task_translator import create_translator, TaskModel
     from src.task_manager import TaskManager
     from src.parallel_config import init_parallel_config, get_config
+    from src.execution_limits import (
+        init_execution_limits, get_limits, set_limits, 
+        get_metrics, ExecutionLimits
+    )
     print("✓ Task management modules imported successfully")
 except ImportError as e:
     print(f"✗ Failed to import task management modules: {e}")
@@ -48,6 +53,15 @@ try:
     print(parallel_config)
 except Exception as e:
     print(f"✗ Warning: Parallel configuration initialization failed: {e}")
+    traceback.print_exc()
+
+# Initialize execution limits
+try:
+    execution_limits = init_execution_limits()
+    print("✓ Execution limits initialized")
+    print(execution_limits)
+except Exception as e:
+    print(f"✗ Warning: Execution limits initialization failed: {e}")
     traceback.print_exc()
 
 # Initialize task translator
@@ -259,6 +273,143 @@ def update_parallel_config():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/limits", methods=["GET"])
+def get_execution_limits():
+    """Get current execution limits configuration"""
+    try:
+        limits = get_limits()
+        return jsonify(limits.to_dict())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/limits", methods=["PUT"])
+def update_execution_limits():
+    """
+    Update execution limits configuration.
+    
+    Example body:
+    {
+        "mcp": {
+            "max_iterations": 30,
+            "command_timeout": 600
+        },
+        "docker": {
+            "exec_timeout": 600
+        }
+    }
+    """
+    try:
+        data = request.json
+        limits = ExecutionLimits.from_dict(data)
+        set_limits(limits)
+        
+        return jsonify({
+            "status": "updated",
+            "limits": limits.to_dict()
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/metrics", methods=["GET"])
+def get_execution_metrics():
+    """
+    Get execution metrics (kill-switch hit counts).
+    
+    Tracks how often each soft kill-switch was triggered:
+    - MCP iteration limits
+    - LLM rate limits
+    - Task retry exhaustion
+    - Docker command timeouts
+    """
+    try:
+        metrics = get_metrics()
+        return jsonify(metrics.to_dict())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/metrics", methods=["DELETE"])
+def reset_execution_metrics():
+    """Reset execution metrics counters"""
+    try:
+        metrics = get_metrics()
+        metrics.reset()
+        return jsonify({"status": "reset"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """
+    Comprehensive health check.
+    
+    Returns:
+    - Execution limits configuration
+    - Current metrics
+    - Task queue status
+    - Container connection status
+    """
+    try:
+        from src.task_models import TaskStatus
+        
+        limits = get_limits()
+        metrics = get_metrics()
+        
+        # Test container connection
+        container_ok = False
+        container_msg = "Task manager not initialized"
+        
+        if task_manager:
+            try:
+                # Use the task_manager's mcp_client for health check
+                container_ok, container_msg = task_manager.mcp_client.test_connection()
+            except Exception as e:
+                container_ok = False
+                container_msg = str(e)
+        
+        # Count active tasks
+        active_tasks = 0
+        total_tasks = 0
+        
+        if task_manager:
+            total_tasks = len(task_manager.tasks)
+            active_tasks = sum(
+                1 for info in task_manager.tasks.values()
+                if info['status'] in [TaskStatus.PENDING, TaskStatus.PLANNING, TaskStatus.WORKING]
+            )
+        
+        # Get executor status
+        executor_status = {}
+        if task_manager:
+            try:
+                executor_status = task_manager.get_executor_status()
+            except:
+                pass
+        
+        return jsonify({
+            "status": "healthy" if container_ok else "degraded",
+            "container": {
+                "connected": container_ok,
+                "message": container_msg
+            },
+            "limits": limits.to_dict(),
+            "metrics": metrics.to_dict(),
+            "tasks": {
+                "active": active_tasks,
+                "total": total_tasks
+            },
+            "executor": executor_status
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e)
+        }), 500
+
+
 @app.route("/translate", methods=["POST"])
 def translate():
     """Translate user request into structured task"""
@@ -378,6 +529,10 @@ def cancel_task(task_id):
         
         success = task_manager.cancel_task(task_id)
         if success:
+            # Track cancellation metric
+            metrics = get_metrics()
+            metrics.increment('cancellations')
+            
             return jsonify({"status": "cancelled", "task_id": task_id})
         else:
             return jsonify({"error": "Task not found or cannot be cancelled"}), 400
@@ -437,6 +592,10 @@ def cancel_node(node_id):
         
         success = task_manager.cancel_node(node_id)
         if success:
+            # Track cancellation metric
+            metrics = get_metrics()
+            metrics.increment('cancellations')
+            
             return jsonify({"status": "cancelled", "node_id": node_id})
         else:
             return jsonify({"error": "Node not found or cannot be cancelled"}), 400
@@ -571,9 +730,6 @@ def rescope_node(node_id):
         "new_parent_id": "n123456",
         "reason": "Failed exploit, trying lateral movement"
     }
-    
-    Example use case:
-    - Exploit failed → jump back to recon parent for lateral movement
     """
     try:
         if not task_manager:
@@ -623,11 +779,6 @@ def add_variant_node(node_id):
         "description": "Run sqlmap --tamper=space2comment",
         "verification": "SQLi successful with tamper"
     }
-    
-    Example use cases:
-    - SQLi blocked by WAF → add variant with tamper scripts
-    - Password spray with different user lists
-    - A/B testing different payloads
     """
     try:
         if not task_manager:
@@ -685,12 +836,6 @@ def add_variant_node(node_id):
 def get_node_credentials(node_id):
     """
     Get credential chain: all previous nodes that may have credentials.
-    
-    Leverages LEFT (siblings) and UP (ancestors) traversal to find credential sources.
-    
-    Example use case:
-    - RDP spray wants to reuse credentials cracked by earlier hashcat node
-    - Traces data lineage through LEFT and UP edges
     """
     try:
         if not task_manager:

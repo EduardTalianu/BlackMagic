@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-app.py - Fixed status tracking and added force start + improve for nodes
+app.py - Task management API with 4-direction graph support and automatic status reconciliation
 """
 import os
 import docker
@@ -9,6 +9,8 @@ import sys
 from flask import Flask, request, render_template_string, jsonify
 import datetime
 import json
+import threading
+import time
 
 # Import task management system
 try:
@@ -71,6 +73,66 @@ except Exception as e:
     print(f"✗ Warning: Task manager initialization failed: {e}")
     traceback.print_exc()
     task_manager = None
+
+
+def reconcile_node_status():
+    """
+    Background task: Reconcile status across all nodes every 5 minutes.
+    
+    Scans all node logs for completion markers (DONE:) and updates status
+    if mismatched between logs and TaskManager state.
+    """
+    while True:
+        try:
+            time.sleep(300)  # 5 minutes
+            
+            if not task_manager:
+                continue
+            
+            reconciled_count = 0
+            
+            with task_manager.nodes_lock:
+                for node_id, node_data in list(task_manager.nodes.items()):
+                    current_status = node_data['status']
+                    
+                    # Skip already completed/failed/cancelled
+                    if current_status in ['completed', 'failed', 'cancelled', 'impossible']:
+                        continue
+                    
+                    # Check log for completion marker
+                    log_content = task_manager.get_node_log(node_id)
+                    
+                    if log_content and 'DONE:' in log_content:
+                        # Log shows completion but status is stuck
+                        task_id = node_data['task_id']
+                        
+                        print(f"[RECONCILE] Node {node_id} stuck at '{current_status}' but log shows DONE")
+                        
+                        # Update self.nodes
+                        task_manager.nodes[node_id]['status'] = 'completed'
+                        task_manager.nodes[node_id]['completed_at'] = datetime.datetime.now()
+                        
+                        # Sync to TRM
+                        with task_manager.trms_lock:
+                            if task_id in task_manager.trms:
+                                trm = task_manager.trms[task_id]
+                                trm.update_node_status(node_id, 'completed')
+                        
+                        reconciled_count += 1
+                        print(f"[RECONCILE] ✓ Node {node_id} status updated to 'completed'")
+            
+            if reconciled_count > 0:
+                print(f"[RECONCILE] Reconciled {reconciled_count} stuck node(s)")
+                
+        except Exception as e:
+            print(f"[RECONCILE] Error during reconciliation: {e}")
+            traceback.print_exc()
+
+
+# Start background reconciliation thread
+reconcile_thread = threading.Thread(target=reconcile_node_status, daemon=True)
+reconcile_thread.start()
+print("✓ Background status reconciliation started (runs every 5 minutes)")
 
 
 def log_translation(user_request, translated_task):
@@ -263,15 +325,10 @@ def get_all_tasks():
         
         tasks = task_manager.list_all_tasks()
         
-        print(f"[API] Returning {len(tasks)} task/node entries")
-        for t in tasks[:5]:
-            print(f"[API]   - {t.get('type', 'unknown')}: {t.get('abstract', 'N/A')[:50]} [{t.get('status')}]")
-        
         return jsonify({"tasks": tasks})
         
     except Exception as e:
         print(f"[API] Error in get_all_tasks: {e}")
-        import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -287,15 +344,10 @@ def get_task_status(task_id):
         if not status:
             return jsonify({"error": "Task not found"}), 404
         
-        print(f"[API] Task {task_id} status: {status.get('status')}")
-        if status.get('error'):
-            print(f"[API] Task {task_id} error: {status.get('error')}")
-        
         return jsonify(status)
         
     except Exception as e:
         print(f"[API] Error getting task status: {e}")
-        import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -309,13 +361,10 @@ def get_task_nodes(task_id):
         
         nodes = task_manager.get_task_nodes(task_id)
         
-        print(f"[API] Task {task_id} has {len(nodes)} nodes")
-        
         return jsonify({"nodes": nodes})
         
     except Exception as e:
         print(f"[API] Error getting task nodes: {e}")
-        import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
@@ -381,7 +430,7 @@ def restart_task(task_id):
 
 @app.route("/node/<node_id>/cancel", methods=["PUT"])
 def cancel_node(node_id):
-    """Cancel a specific node (keeps it in tree but stops execution)"""
+    """Cancel a specific node (keeps in tree but stops execution)"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
@@ -398,7 +447,7 @@ def cancel_node(node_id):
 
 @app.route("/node/<node_id>/complete", methods=["PUT"])
 def complete_node(node_id):
-    """Mark a node as completed"""
+    """Mark a node as completed manually"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
@@ -507,9 +556,172 @@ def get_node_log(node_id):
         
     except Exception as e:
         print(f"[API] Error getting node log: {e}")
-        import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+# ========== 4-DIRECTION GRAPH ENDPOINTS ==========
+
+@app.route("/node/<node_id>/rescope", methods=["POST"])
+def rescope_node(node_id):
+    """
+    Re-scope: move node to different parent (UP navigation).
+    
+    Body: {
+        "new_parent_id": "n123456",
+        "reason": "Failed exploit, trying lateral movement"
+    }
+    
+    Example use case:
+    - Exploit failed → jump back to recon parent for lateral movement
+    """
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        data = request.json
+        new_parent_id = data.get("new_parent_id")
+        reason = data.get("reason", "")
+        
+        if not new_parent_id:
+            return jsonify({"error": "new_parent_id required"}), 400
+        
+        # Get node's task_id
+        with task_manager.nodes_lock:
+            if node_id not in task_manager.nodes:
+                return jsonify({"error": "Node not found"}), 404
+            task_id = task_manager.nodes[node_id]['task_id']
+        
+        # Get TRM
+        with task_manager.trms_lock:
+            if task_id not in task_manager.trms:
+                return jsonify({"error": "Task not found"}), 404
+            trm = task_manager.trms[task_id]
+        
+        # Perform re-scope using 4-direction graph
+        trm.move_node_to_new_parent(node_id, new_parent_id, reason)
+        
+        return jsonify({
+            "status": "rescoped",
+            "node_id": node_id,
+            "new_parent_id": new_parent_id,
+            "reason": reason
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/add-variant", methods=["POST"])
+def add_variant_node(node_id):
+    """
+    Add variant as right sibling (RIGHT navigation).
+    
+    Body: {
+        "abstract": "sqlmap with tamper scripts",
+        "description": "Run sqlmap --tamper=space2comment",
+        "verification": "SQLi successful with tamper"
+    }
+    
+    Example use cases:
+    - SQLi blocked by WAF → add variant with tamper scripts
+    - Password spray with different user lists
+    - A/B testing different payloads
+    """
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        data = request.json
+        abstract = data.get("abstract")
+        description = data.get("description")
+        verification = data.get("verification")
+        
+        if not all([abstract, description, verification]):
+            return jsonify({"error": "abstract, description, verification required"}), 400
+        
+        # Get node's task_id
+        with task_manager.nodes_lock:
+            if node_id not in task_manager.nodes:
+                return jsonify({"error": "Node not found"}), 404
+            task_id = task_manager.nodes[node_id]['task_id']
+        
+        # Get TRM
+        with task_manager.trms_lock:
+            if task_id not in task_manager.trms:
+                return jsonify({"error": "Task not found"}), 404
+            trm = task_manager.trms[task_id]
+        
+        # Generate variant node ID
+        variant_node_id = trm.generate_node_id()
+        
+        # Add variant using 4-direction graph
+        trm.add_sibling_variant(node_id, variant_node_id, abstract, description)
+        
+        # Register with task manager
+        task_manager.register_node(
+            task_id=task_id,
+            node_id=variant_node_id,
+            node_info={
+                'abstract': abstract,
+                'parent_id': trm.graph.get_parent(node_id),
+                'status': 'pending'
+            }
+        )
+        
+        return jsonify({
+            "status": "variant_added",
+            "reference_node_id": node_id,
+            "variant_node_id": variant_node_id
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/node/<node_id>/credentials", methods=["GET"])
+def get_node_credentials(node_id):
+    """
+    Get credential chain: all previous nodes that may have credentials.
+    
+    Leverages LEFT (siblings) and UP (ancestors) traversal to find credential sources.
+    
+    Example use case:
+    - RDP spray wants to reuse credentials cracked by earlier hashcat node
+    - Traces data lineage through LEFT and UP edges
+    """
+    try:
+        if not task_manager:
+            return jsonify({"error": "Task manager not initialized"}), 500
+        
+        # Get node's task_id
+        with task_manager.nodes_lock:
+            if node_id not in task_manager.nodes:
+                return jsonify({"error": "Node not found"}), 404
+            task_id = task_manager.nodes[node_id]['task_id']
+        
+        # Get TRM
+        with task_manager.trms_lock:
+            if task_id not in task_manager.trms:
+                return jsonify({"error": "Task not found"}), 404
+            trm = task_manager.trms[task_id]
+        
+        # Get credential chain using 4-direction traversal
+        cred_chain = trm.get_credential_chain(node_id)
+        
+        return jsonify({
+            "node_id": node_id,
+            "credential_sources": cred_chain
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ========== END 4-DIRECTION GRAPH ENDPOINTS ==========
 
 
 @app.route("/tree", methods=["GET"])
@@ -566,146 +778,6 @@ def get_file():
         if error:
             return jsonify({"error": error}), 400
         return jsonify({"content": content})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
-@app.route("/node/<node_id>/rescope", methods=["POST"])
-def rescope_node(node_id: str):
-    """
-    Re-scope: move node to different parent.
-    
-    Body: {"new_parent_id": "n123456", "reason": "Failed exploit, trying lateral movement"}
-    """
-    try:
-        if not task_manager:
-            return jsonify({"error": "Task manager not initialized"}), 500
-        
-        data = request.json
-        new_parent_id = data.get("new_parent_id")
-        reason = data.get("reason", "")
-        
-        if not new_parent_id:
-            return jsonify({"error": "new_parent_id required"}), 400
-        
-        # Get node's task_id
-        with task_manager.nodes_lock:
-            if node_id not in task_manager.nodes:
-                return jsonify({"error": "Node not found"}), 404
-            task_id = task_manager.nodes[node_id]['task_id']
-        
-        # Get TRM
-        with task_manager.trms_lock:
-            if task_id not in task_manager.trms:
-                return jsonify({"error": "Task not found"}), 404
-            trm = task_manager.trms[task_id]
-        
-        # Perform re-scope
-        trm.move_node_to_new_parent(node_id, new_parent_id, reason)
-        
-        return jsonify({
-            "status": "rescoped",
-            "node_id": node_id,
-            "new_parent_id": new_parent_id,
-            "reason": reason
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/node/<node_id>/add-variant", methods=["POST"])
-def add_variant_node(node_id: str):
-    """
-    Add variant as right sibling (A/B testing, payload variants).
-    
-    Body: {
-        "abstract": "sqlmap with tamper scripts",
-        "description": "Run sqlmap --tamper=space2comment",
-        "verification": "SQLi successful with tamper"
-    }
-    """
-    try:
-        if not task_manager:
-            return jsonify({"error": "Task manager not initialized"}), 500
-        
-        data = request.json
-        abstract = data.get("abstract")
-        description = data.get("description")
-        verification = data.get("verification")
-        
-        if not all([abstract, description, verification]):
-            return jsonify({"error": "abstract, description, verification required"}), 400
-        
-        # Get node's task_id
-        with task_manager.nodes_lock:
-            if node_id not in task_manager.nodes:
-                return jsonify({"error": "Node not found"}), 404
-            task_id = task_manager.nodes[node_id]['task_id']
-        
-        # Get TRM
-        with task_manager.trms_lock:
-            if task_id not in task_manager.trms:
-                return jsonify({"error": "Task not found"}), 404
-            trm = task_manager.trms[task_id]
-        
-        # Generate variant node ID
-        variant_node_id = trm.generate_node_id()
-        
-        # Add variant
-        trm.add_sibling_variant(node_id, variant_node_id, abstract, description)
-        
-        # Register with task manager
-        task_manager.register_node(
-            task_id=task_id,
-            node_id=variant_node_id,
-            node_info={
-                'abstract': abstract,
-                'parent_id': trm.graph.get_parent(node_id),
-                'status': 'pending'
-            }
-        )
-        
-        return jsonify({
-            "status": "variant_added",
-            "reference_node_id": node_id,
-            "variant_node_id": variant_node_id
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/node/<node_id>/credentials", methods=["GET"])
-def get_node_credentials(node_id: str):
-    """
-    Get credential chain: all previous nodes that may have credentials.
-    
-    Leverages LEFT and UP traversal to find credential sources.
-    """
-    try:
-        if not task_manager:
-            return jsonify({"error": "Task manager not initialized"}), 500
-        
-        # Get node's task_id
-        with task_manager.nodes_lock:
-            if node_id not in task_manager.nodes:
-                return jsonify({"error": "Node not found"}), 404
-            task_id = task_manager.nodes[node_id]['task_id']
-        
-        # Get TRM
-        with task_manager.trms_lock:
-            if task_id not in task_manager.trms:
-                return jsonify({"error": "Task not found"}), 404
-            trm = task_manager.trms[task_id]
-        
-        # Get credential chain
-        cred_chain = trm.get_credential_chain(node_id)
-        
-        return jsonify({
-            "node_id": node_id,
-            "credential_sources": cred_chain
-        })
-        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

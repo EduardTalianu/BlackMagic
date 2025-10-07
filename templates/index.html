@@ -79,6 +79,8 @@ option.depth-4{padding-left:80px}
 .modal-content h3{margin:0 0 15px 0}
 .modal-content textarea{min-height:100px;margin-bottom:15px}
 .modal-buttons{display:flex;gap:10px;justify-content:flex-end}
+.graph-container{position:relative;width:100%;height:100%;overflow:auto}
+.graph-controls{position:absolute;top:10px;right:10px;background:var(--card-bg);border:1px solid var(--card-border);border-radius:6px;padding:8px;z-index:10;display:flex;gap:8px}
 </style>
 </head>
 <body>
@@ -122,10 +124,17 @@ option.depth-4{padding-left:80px}
     
     <div id="tasks" class="tab-content active">
       <div class="toolbar">
+        <select id="tasksViewSelect">
+          <option value="list">List View</option>
+          <option value="graph">Graph View</option>
+        </select>
         <button class="btn-primary" id="refreshTasksBtn">🔄 Refresh</button>
         <span id="count"></span>
       </div>
-      <div id="taskList"></div>
+      <div id="taskList" style="display:block"></div>
+      <div id="taskGraph" class="graph-container" style="display:none">
+        <div id="taskGraphView"></div>
+      </div>
     </div>
     
     <div id="graph" class="tab-content">
@@ -134,7 +143,7 @@ option.depth-4{padding-left:80px}
         <button class="btn-primary" id="loadGraphBtn">Load</button>
         <button id="graphAuto" class="btn-primary">Auto: OFF</button>
       </div>
-      <div id="graphView" style="flex:1;overflow:auto;background:#1a1a1a;padding:10px"></div>
+      <div id="graphView" class="graph-container" style="flex:1;background:#1a1a1a;padding:10px"></div>
     </div>
     
     <div id="output" class="tab-content">
@@ -202,13 +211,14 @@ let auto={graph:false,output:false};
 let nodeCache={};
 let improveTaskId=null;
 let improveNodeId=null;
+let graphScrollPos={tasks:0,graph:0}; // Track scroll positions
 
 // DOM element references
 let input, status, startBtn, resetBtn, taskCard, abstract, description, verification;
 let graphId, outputTaskId, outputNodeSelect;
-let graphView, outputView, fileGrid, fileView, path, upBtn, taskList, count;
+let graphView, outputView, fileGrid, fileView, path, upBtn, taskList, taskGraph, taskGraphView, count;
 let refreshTasksBtn, loadGraphBtn, loadOutputBtn, graphAuto, outputAuto;
-let navWork, navLogs, navShared;
+let navWork, navLogs, navShared, tasksViewSelect;
 let improveTaskModal, improveTaskComments, improveTaskCancelBtn, improveTaskSubmitBtn;
 let improveNodeModal, improveNodeComments, improveNodeCancelBtn, improveNodeSubmitBtn;
 
@@ -241,6 +251,8 @@ document.addEventListener('DOMContentLoaded',()=>{
   path = document.getElementById('path');
   upBtn = document.getElementById('upBtn');
   taskList = document.getElementById('taskList');
+  taskGraph = document.getElementById('taskGraph');
+  taskGraphView = document.getElementById('taskGraphView');
   count = document.getElementById('count');
   refreshTasksBtn = document.getElementById('refreshTasksBtn');
   loadGraphBtn = document.getElementById('loadGraphBtn');
@@ -250,6 +262,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   navWork = document.getElementById('navWork');
   navLogs = document.getElementById('navLogs');
   navShared = document.getElementById('navShared');
+  tasksViewSelect = document.getElementById('tasksViewSelect');
   improveTaskModal = document.getElementById('improveTaskModal');
   improveTaskComments = document.getElementById('improveTaskComments');
   improveTaskCancelBtn = document.getElementById('improveTaskCancelBtn');
@@ -280,6 +293,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   navWork.addEventListener('click', ()=>loadFiles('/app/work'));
   navLogs.addEventListener('click', ()=>loadFiles('/app/logs'));
   navShared.addEventListener('click', ()=>loadFiles('/shared'));
+  tasksViewSelect.addEventListener('change', switchTasksView);
   
   // Task improvement modal
   improveTaskCancelBtn.addEventListener('click', ()=>{improveTaskModal.classList.remove('active');improveTaskId=null;});
@@ -315,6 +329,18 @@ function switchTab(name){
   document.getElementById(name).classList.add('active');
   if(name==='files')loadFiles(curPath);
   else if(name==='tasks')loadTasks();
+}
+
+function switchTasksView(){
+  const view = tasksViewSelect.value;
+  if(view === 'graph'){
+    taskList.style.display = 'none';
+    taskGraph.style.display = 'block';
+    loadTasksGraph();
+  }else{
+    taskList.style.display = 'block';
+    taskGraph.style.display = 'none';
+  }
 }
 
 // Node dropdown population
@@ -518,10 +544,6 @@ async function loadTasks(){
       const div=document.createElement('div');
       div.className='task '+t.status;
       
-      // Debug log
-      console.log('Task:', t.task_id, 'Status:', t.status, 'Restartable:', t.is_restartable);
-      
-      // Determine button states
       const canImprove = t.status==='failed' || t.status==='cancelled' || t.status==='impossible' || t.status==='completed';
       const canCancel = t.status==='working' || t.status==='planning' || t.status==='pending';
       
@@ -544,10 +566,6 @@ async function loadTasks(){
         const nd=document.createElement('div');
         nd.className='task node '+n.status;
         
-        // Debug log
-        console.log('Node:', n.node_id, 'Status:', n.status, 'Restartable:', n.is_restartable);
-        
-        // Determine button states
         const canStart = n.status==='pending' || n.status==='cancelled' || n.status==='failed';
         const canImprove = n.status==='failed' || n.status==='cancelled' || n.status==='impossible';
         const canCancel = n.status==='working' || n.status==='planning' || n.status==='pending';
@@ -570,7 +588,94 @@ async function loadTasks(){
         taskList.appendChild(nd);
       });
     });
+    
+    // Update graph view if active
+    if(tasksViewSelect.value === 'graph'){
+      loadTasksGraph();
+    }
   }catch(e){taskList.innerHTML='<div style="color:#f44336">Error: '+e.message+'</div>'}
+}
+
+async function loadTasksGraph(){
+  try{
+    const r=await fetch('/task/status');
+    const d=await r.json();
+    if(d.error){
+      taskGraphView.innerHTML='<div style="color:#f44336;padding:20px">'+d.error+'</div>';
+      return;
+    }
+    
+    const roots=d.tasks.filter(t=>t.type==='root');
+    if(!roots.length){
+      taskGraphView.innerHTML='<div style="color:#999;padding:40px;text-align:center">No tasks yet</div>';
+      return;
+    }
+    
+    // Save scroll position
+    graphScrollPos.tasks = taskGraph.scrollTop;
+    
+    // Build combined graph from all tasks
+    let combinedGraph = 'graph TD\n';
+    let styles = new Set();
+    
+    for(const root of roots){
+      const graphR = await fetch('/tree?task_id='+root.task_id);
+      const graphD = await graphR.json();
+      if(graphD.graph){
+        const lines = graphD.graph.split('\n');
+        lines.forEach(line => {
+          const trimmed = line.trim();
+          if(trimmed && !trimmed.startsWith('graph ') && !trimmed.startsWith('%%') && !trimmed.startsWith('classDef') && !trimmed.startsWith('class ')){
+            combinedGraph += '    ' + trimmed + '\n';
+          }else if(trimmed.startsWith('classDef') || trimmed.startsWith('class ')){
+            styles.add(trimmed);
+          }
+        });
+      }
+    }
+    
+    // Add styles
+    combinedGraph += '\n    %% Enhanced styling for dark mode\n';
+    combinedGraph += '    classDef completed fill:#2e7d32,stroke:#4caf50,stroke-width:3px,color:#ffffff\n';
+    combinedGraph += '    classDef working fill:#f57c00,stroke:#ff9800,stroke-width:3px,color:#ffffff\n';
+    combinedGraph += '    classDef planning fill:#1976d2,stroke:#2196f3,stroke-width:3px,color:#ffffff\n';
+    combinedGraph += '    classDef failed fill:#c62828,stroke:#f44336,stroke-width:3px,color:#ffffff\n';
+    combinedGraph += '    classDef cancelled fill:#616161,stroke:#9e9e9e,stroke-width:3px,color:#ffffff\n';
+    combinedGraph += '    classDef impossible fill:#6a1b9a,stroke:#9c27b0,stroke-width:3px,color:#ffffff\n';
+    combinedGraph += '    classDef pending fill:#37474f,stroke:#607d8b,stroke-width:2px,color:#e0e0e0\n';
+    
+    styles.forEach(style => {
+      combinedGraph += '    ' + style + '\n';
+    });
+    
+    // Apply theme
+    let themedGraph = `%%{init: {'theme':'dark', 'themeVariables': {
+        'primaryColor': '#2d2d2d',
+        'primaryTextColor': '#e0e0e0',
+        'primaryBorderColor': '#64b5f6',
+        'lineColor': '#64b5f6',
+        'secondaryColor': '#1e3a5f',
+        'tertiaryColor': '#3d2f1f',
+        'background': '#1a1a1a',
+        'mainBkg': '#2d2d2d',
+        'secondBkg': '#3d3d3d',
+        'mainContrastColor': '#e0e0e0',
+        'darkMode': true,
+        'fontFamily': 'Arial',
+        'fontSize': '14px'
+      }}}%%\n` + combinedGraph;
+    
+    taskGraphView.innerHTML='<div class="mermaid">'+themedGraph+'</div>';
+    mermaid.init(undefined,taskGraphView.querySelector('.mermaid'));
+    
+    // Restore scroll position
+    setTimeout(() => {
+      taskGraph.scrollTop = graphScrollPos.tasks;
+    }, 100);
+    
+  }catch(e){
+    taskGraphView.innerHTML='<div style="color:#f44336">'+e.message+'</div>';
+  }
 }
 
 async function viewTask(id,e){
@@ -631,6 +736,7 @@ async function completeNode(id,e){
     const d=await r.json();
     msg(d.error?'❌ '+d.error:'✅ Completed '+id,d.error?'#f44336':'#4caf50');
     loadTasks();
+    loadGraph(); // Refresh graph
   }catch(e){msg('❌ '+e.message,'#f44336')}
 }
 
@@ -735,6 +841,10 @@ async function submitNodeImprovement(){
 async function loadGraph(){
   const id=graphId.value.trim();
   if(!id)return msg('⚠ Enter task ID','#ff9800');
+  
+  // Save scroll position before update
+  graphScrollPos.graph = graphView.scrollTop;
+  
   try{
     const r=await fetch('/tree?task_id='+id);
     const d=await r.json();
@@ -761,6 +871,12 @@ async function loadGraph(){
     
     graphView.innerHTML='<div class="mermaid">'+graph+'</div>';
     mermaid.init(undefined,graphView.querySelector('.mermaid'));
+    
+    // Restore scroll position after render
+    setTimeout(() => {
+      graphView.scrollTop = graphScrollPos.graph;
+    }, 100);
+    
   }catch(e){graphView.innerHTML='<div style="color:#f44336">'+e.message+'</div>'}
 }
 

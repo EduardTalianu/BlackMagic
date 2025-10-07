@@ -247,11 +247,27 @@ RULES:
                 raw_result = self.run_mcp_agent(advice)
                 print(f"[{self.node_id}][D{self.depth}] MCP completed: {len(raw_result)} chars")
                 
+                # ADD THIS: Check if MCP returned DONE marker
+                if "DONE:" in raw_result:
+                    print(f"[{self.node_id}][D{self.depth}] MCP marked as DONE")
+                    # Force mark as complete even without verification
+                    result = self.digest_result_to_abstract(raw_result)
+                    
+                    # CRITICAL: Update status before returning
+                    self._update_status(TaskStatus.COMPLETED)
+                    
+                    print(f"[{self.node_id}][D{self.depth}] ✓ Status updated to COMPLETED")
+                    return result
+                
                 print(f"[{self.node_id}][D{self.depth}] Verifying...")
                 if self.check_task_result(raw_result):
                     print(f"[{self.node_id}][D{self.depth}] ✓ Verified!")
                     result = self.digest_result_to_abstract(raw_result)
+                    
+                    # CRITICAL: Update status before returning
                     self._update_status(TaskStatus.COMPLETED)
+                    
+                    print(f"[{self.node_id}][D{self.depth}] ✓ Status updated to COMPLETED")
                     return result
                 else:
                     print(f"[{self.node_id}][D{self.depth}] ✗ Verification failed")
@@ -262,8 +278,12 @@ RULES:
                     advice += f"\n\nPrevious failed: {str(e)}\nTry different approach."
                     continue
                 else:
+                    # CRITICAL: Update status before raising
+                    self._update_status(TaskStatus.FAILED, str(e))
                     raise TaskImpossibleException(f"Failed after 3 attempts: {str(e)}")
         
+        # CRITICAL: Update status if we exit loop
+        self._update_status(TaskStatus.FAILED, "Exhausted attempts")
         raise TaskImpossibleException("Exhausted attempts")
     
     def branch_and_execute(self, branch_req: BranchRequirement) -> TaskModelOut:

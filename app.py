@@ -7,7 +7,7 @@ import os
 import docker
 import traceback
 import sys
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template, jsonify
 import datetime
 import json
 import threading
@@ -30,6 +30,8 @@ except ImportError as e:
 
 app = Flask(__name__)
 
+app.static_folder = 'static'
+app.static_url_path = '/static'
 LLM_URL = os.getenv("LLM_BASE_URL", "https://api.moonshot.ai/v1") + "/chat/completions"
 LLM_KEY = os.getenv("MOONSHOT_API_KEY")
 LLM_MODEL = os.getenv("LLM_MODEL", "kimi-k2-0905-preview")
@@ -220,8 +222,8 @@ def get_file_content(path):
 
 @app.route("/")
 def index():
-    with open("templates/index.html") as f:
-        return render_template_string(f.read())
+    return render_template('index.html')
+
 
 
 @app.route("/config", methods=["GET"])

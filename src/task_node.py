@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-task_node.py - Complete implementation with multi-level branching, timeouts, and stuck-loop prevention
+task_node.py - Staggered parallel execution (2 nodes every 3 minutes)
 """
 import os
 import json
@@ -30,18 +30,22 @@ class TaskImpossibleException(Exception):
 
 class TaskNode:
     """
-    Task node with depth-aware timeout and execution strategy.
-    Supports multi-level branching with parallel/sequential execution.
+    Task node with staggered parallel execution.
+    Starts 2 sub-nodes every 3 minutes, no worker limit except LLM rate limiting.
     """
     
     # Class-level resources
     _llm_semaphore = Semaphore(3)
-    _executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="TaskNode")
+    _executor = ThreadPoolExecutor(max_workers=100, thread_name_prefix="TaskNode")  # High limit
     
     # Timeout configuration (in seconds)
     BASE_LEAF_TIMEOUT = 300      # 5 minutes for leaf task execution
     TIMEOUT_PER_LEVEL = 300       # +5 minutes per parent level
-    PARALLEL_DEPTH_LIMIT = 2      # Sequential execution at depth 3+
+    PARALLEL_DEPTH_LIMIT = 99     # Effectively unlimited parallel depth
+    
+    # Staggered execution settings
+    STAGGER_BATCH_SIZE = 2        # Start 2 nodes per batch
+    STAGGER_DELAY = 180           # 3 minutes between batches
     
     def __init__(
         self,
@@ -69,7 +73,7 @@ class TaskNode:
         self.node_id = task_model.node_id if hasattr(task_model, 'node_id') else None
         self._replan_counter = 0
         self._max_replans = 2
-        self._llm_failures = 0  # Instance-level failure counter
+        self._llm_failures = 0
         
         # Calculate timeout for this node based on depth
         self.timeout = self._calculate_timeout()
@@ -203,7 +207,7 @@ RULES:
             response = self._call_llm(system_prompt, user_prompt, temperature=0.3, timeout=60)
             print(f"[{self.node_id}][D{self.depth}] Planner response: {len(response)} chars")
             
-            self._llm_failures = 0  # Reset on success
+            self._llm_failures = 0
             
             json_str = self._extract_json(response)
             data = json.loads(json_str)
@@ -247,15 +251,10 @@ RULES:
                 raw_result = self.run_mcp_agent(advice)
                 print(f"[{self.node_id}][D{self.depth}] MCP completed: {len(raw_result)} chars")
                 
-                # ADD THIS: Check if MCP returned DONE marker
                 if "DONE:" in raw_result:
                     print(f"[{self.node_id}][D{self.depth}] MCP marked as DONE")
-                    # Force mark as complete even without verification
                     result = self.digest_result_to_abstract(raw_result)
-                    
-                    # CRITICAL: Update status before returning
                     self._update_status(TaskStatus.COMPLETED)
-                    
                     print(f"[{self.node_id}][D{self.depth}] ✓ Status updated to COMPLETED")
                     return result
                 
@@ -263,10 +262,7 @@ RULES:
                 if self.check_task_result(raw_result):
                     print(f"[{self.node_id}][D{self.depth}] ✓ Verified!")
                     result = self.digest_result_to_abstract(raw_result)
-                    
-                    # CRITICAL: Update status before returning
                     self._update_status(TaskStatus.COMPLETED)
-                    
                     print(f"[{self.node_id}][D{self.depth}] ✓ Status updated to COMPLETED")
                     return result
                 else:
@@ -278,16 +274,14 @@ RULES:
                     advice += f"\n\nPrevious failed: {str(e)}\nTry different approach."
                     continue
                 else:
-                    # CRITICAL: Update status before raising
                     self._update_status(TaskStatus.FAILED, str(e))
                     raise TaskImpossibleException(f"Failed after 3 attempts: {str(e)}")
         
-        # CRITICAL: Update status if we exit loop
         self._update_status(TaskStatus.FAILED, "Exhausted attempts")
         raise TaskImpossibleException("Exhausted attempts")
     
     def branch_and_execute(self, branch_req: BranchRequirement) -> TaskModelOut:
-        """Branch and execute with depth-aware strategy"""
+        """Branch and execute with staggered parallel execution"""
         try:
             num_subtasks = len(branch_req.task_chain.tasks)
             print(f"[{self.node_id}][D{self.depth}] ========== BRANCHING: {num_subtasks} sub-tasks ==========")
@@ -345,16 +339,9 @@ RULES:
                     callback = self.task_manager.get_node_output_callback(node.node_id)
                     node.mcp_client.output_callback = callback
             
-            # Decide execution strategy based on depth
-            use_parallel = self.enable_parallel and num_subtasks > 1 and self.depth < self.PARALLEL_DEPTH_LIMIT
-            
-            if use_parallel:
-                print(f"[{self.node_id}][D{self.depth}] Strategy: PARALLEL (depth < {self.PARALLEL_DEPTH_LIMIT})")
-                results = self._execute_parallel(sub_nodes)
-            else:
-                reason = "depth >= limit" if self.depth >= self.PARALLEL_DEPTH_LIMIT else "single task"
-                print(f"[{self.node_id}][D{self.depth}] Strategy: SEQUENTIAL ({reason})")
-                results = self._execute_sequential(sub_nodes)
+            # Use staggered parallel execution
+            print(f"[{self.node_id}][D{self.depth}] Strategy: STAGGERED PARALLEL (2 every 3min)")
+            results = self._execute_parallel_staggered(sub_nodes)
             
             print(f"[{self.node_id}][D{self.depth}] All {num_subtasks} sub-tasks completed!")
             
@@ -372,79 +359,94 @@ RULES:
             else:
                 raise
     
-    def _execute_sequential(self, sub_nodes: List['TaskNode']) -> List[TaskModelOut]:
-        """Execute sub-tasks one by one"""
-        print(f"[{self.node_id}][D{self.depth}] SEQUENTIAL: {len(sub_nodes)} nodes")
-        results = []
-        for i, node in enumerate(sub_nodes):
-            print(f"[{self.node_id}][D{self.depth}] Sequential {i+1}/{len(sub_nodes)}: {node.node_id}")
-            try:
-                result = node.execute()
-                results.append(result)
-                print(f"[{self.node_id}][D{self.depth}] Sequential {i+1} completed")
-            except Exception as e:
-                print(f"[{self.node_id}][D{self.depth}] Sequential {i+1} failed: {e}")
-                raise
-        return results
-    
-    def _execute_parallel(self, sub_nodes: List['TaskNode']) -> List[TaskModelOut]:
-        """Execute in parallel with proper timeout handling"""
-        print(f"[{self.node_id}][D{self.depth}] PARALLEL: {len(sub_nodes)} nodes")
-        
-        # Calculate total timeout
-        max_child_timeout = max(node.timeout for node in sub_nodes)
-        total_timeout = max_child_timeout + 60
-        
-        print(f"[{self.node_id}][D{self.depth}] Total timeout: {total_timeout}s")
+    def _execute_parallel_staggered(self, sub_nodes: List['TaskNode']) -> List[TaskModelOut]:
+        """
+        Execute in parallel with staggered starts.
+        Starts STAGGER_BATCH_SIZE nodes every STAGGER_DELAY seconds.
+        No limit on total concurrent execution except LLM rate limiting.
+        """
+        print(f"[{self.node_id}][D{self.depth}] STAGGERED PARALLEL: {len(sub_nodes)} nodes")
+        print(f"[{self.node_id}][D{self.depth}] Batch size: {self.STAGGER_BATCH_SIZE}, Delay: {self.STAGGER_DELAY}s")
         
         results = []
         failed_nodes = []
-        
-        # Submit all
         future_to_node = {}
-        for i, node in enumerate(sub_nodes):
-            print(f"[{self.node_id}][D{self.depth}] Submitting {i+1}/{len(sub_nodes)}: {node.node_id}")
-            future = self._executor.submit(self._safe_execute_node, node)
-            future_to_node[future] = node
         
-        print(f"[{self.node_id}][D{self.depth}] Waiting for {len(future_to_node)} futures (timeout={total_timeout}s)...")
+        # Calculate total timeout including stagger time
+        max_child_timeout = max(node.timeout for node in sub_nodes)
+        num_batches = (len(sub_nodes) + self.STAGGER_BATCH_SIZE - 1) // self.STAGGER_BATCH_SIZE
+        stagger_time = (num_batches - 1) * self.STAGGER_DELAY
+        total_timeout = max_child_timeout + stagger_time + 600  # 10 min buffer
         
-        # Collect with timeout
+        print(f"[{self.node_id}][D{self.depth}] Max child timeout: {max_child_timeout}s")
+        print(f"[{self.node_id}][D{self.depth}] Stagger time: {stagger_time}s ({num_batches} batches)")
+        print(f"[{self.node_id}][D{self.depth}] Total timeout: {total_timeout}s")
+        
+        # Submit in batches
+        for batch_idx in range(0, len(sub_nodes), self.STAGGER_BATCH_SIZE):
+            batch = sub_nodes[batch_idx:batch_idx + self.STAGGER_BATCH_SIZE]
+            batch_num = batch_idx // self.STAGGER_BATCH_SIZE + 1
+            
+            # Wait before subsequent batches
+            if batch_idx > 0:
+                print(f"[{self.node_id}][D{self.depth}] ⏳ Waiting {self.STAGGER_DELAY}s before batch {batch_num}/{num_batches}...")
+                time.sleep(self.STAGGER_DELAY)
+            
+            print(f"[{self.node_id}][D{self.depth}] 🚀 Starting batch {batch_num}/{num_batches}: {len(batch)} nodes")
+            
+            for node in batch:
+                print(f"[{self.node_id}][D{self.depth}]    → Submitting {node.node_id}: {node.task_pydantic_model.abstract[:50]}")
+                future = self._executor.submit(self._safe_execute_node, node)
+                future_to_node[future] = node
+        
+        print(f"[{self.node_id}][D{self.depth}] ✅ All {len(sub_nodes)} nodes submitted")
+        print(f"[{self.node_id}][D{self.depth}] 📊 Collecting results (timeout={total_timeout}s)...")
+        
+        # Collect results as they complete
+        completed_count = 0
         try:
             for future in as_completed(future_to_node, timeout=total_timeout):
                 node = future_to_node[future]
                 try:
-                    result = future.result(timeout=10)
+                    result = future.result(timeout=30)
                     results.append(result)
-                    print(f"[PARALLEL][D{self.depth}] ✓ {node.node_id} completed")
+                    completed_count += 1
+                    print(f"[STAGGER][D{self.depth}] ✓ {node.node_id} completed ({completed_count}/{len(sub_nodes)})")
                 except TimeoutError:
-                    print(f"[PARALLEL][D{self.depth}] ✗ {node.node_id} result timeout")
+                    print(f"[STAGGER][D{self.depth}] ✗ {node.node_id} result timeout")
                     failed_nodes.append((node, "Result retrieval timeout"))
                 except Exception as e:
-                    print(f"[PARALLEL][D{self.depth}] ✗ {node.node_id} failed: {e}")
+                    print(f"[STAGGER][D{self.depth}] ✗ {node.node_id} failed: {e}")
                     failed_nodes.append((node, str(e)))
         
         except TimeoutError:
             incomplete = [node for future, node in future_to_node.items() if not future.done()]
-            print(f"[PARALLEL][D{self.depth}] ✗ TIMEOUT: {len(incomplete)} futures unfinished")
+            print(f"[STAGGER][D{self.depth}] ⏰ TIMEOUT: {len(incomplete)}/{len(sub_nodes)} nodes unfinished")
             for node in incomplete:
                 failed_nodes.append((node, "Execution timeout"))
         
+        # Report final status
+        print(f"[{self.node_id}][D{self.depth}] ========== STAGGERED EXECUTION COMPLETE ==========")
+        print(f"[{self.node_id}][D{self.depth}] ✓ Completed: {len(results)}/{len(sub_nodes)}")
+        print(f"[{self.node_id}][D{self.depth}] ✗ Failed: {len(failed_nodes)}/{len(sub_nodes)}")
+        
         if failed_nodes:
             error_summary = "\n".join([f"- {n.task_pydantic_model.abstract[:60]}: {e}" for n, e in failed_nodes])
-            raise TaskImpossibleException(f"Parallel: {len(failed_nodes)}/{len(sub_nodes)} failed:\n{error_summary}")
+            raise TaskImpossibleException(
+                f"Staggered parallel execution: {len(failed_nodes)}/{len(sub_nodes)} nodes failed:\n{error_summary}"
+            )
         
         return results
     
     def _safe_execute_node(self, node: 'TaskNode') -> TaskModelOut:
-        """Thread-safe wrapper"""
+        """Thread-safe wrapper for node execution"""
         try:
-            print(f"[WORKER][D{node.depth}] Starting {node.node_id} (timeout={node.timeout}s)")
+            print(f"[WORKER][D{node.depth}] 🏁 Starting {node.node_id} (timeout={node.timeout}s)")
             result = node.execute()
-            print(f"[WORKER][D{node.depth}] Completed {node.node_id}")
+            print(f"[WORKER][D{node.depth}] ✅ Completed {node.node_id}")
             return result
         except Exception as e:
-            print(f"[WORKER][D{node.depth}] Failed {node.node_id}: {e}")
+            print(f"[WORKER][D{node.depth}] ❌ Failed {node.node_id}: {e}")
             try:
                 node._update_status(TaskStatus.FAILED, str(e))
             except:
@@ -452,7 +454,7 @@ RULES:
             raise
     
     def _create_isolated_mcp_client(self) -> MCPAgent:
-        """Create isolated MCP client"""
+        """Create isolated MCP client for sub-node"""
         return MCPAgent(
             container_name=self.mcp_client.container_name,
             llm_url=self.llm_url,
@@ -464,9 +466,9 @@ RULES:
         )
     
     def _aggregate_results(self, results: List[TaskModelOut]) -> TaskModelOut:
-        """Aggregate results"""
+        """Aggregate multiple task results"""
         if not results:
-            raise TaskImpossibleException("No results")
+            raise TaskImpossibleException("No results to aggregate")
         if len(results) == 1:
             return results[0]
         
@@ -486,12 +488,12 @@ RULES:
         )
     
     def run_mcp_agent(self, advice: str) -> str:
-        """Run MCP agent"""
+        """Run MCP agent with system prompt"""
         system_prompt = self._get_executor_system_prompt(advice)
         return self.mcp_client.execute_task(self.task_pydantic_model, system_prompt)
     
     def check_task_result(self, raw_result: str) -> bool:
-        """Verify completion"""
+        """Verify task completion"""
         system_prompt = """Task verification critic.
 
 Return JSON:
@@ -516,7 +518,7 @@ Met?"""
             return False
     
     def digest_result_to_abstract(self, raw_result: str) -> TaskModelOut:
-        """Summarize result"""
+        """Summarize task result"""
         system_prompt = """Summarize accomplishment.
 
 Return JSON:
@@ -550,29 +552,25 @@ Summary?"""
         )
     
     def _collect_upper_chain_advice(self, rebranch_prompt: str) -> str:
-        """Collect advice using 4-direction graph traversal"""
+        """Collect advice from parent chain and credentials"""
         parts = []
         if rebranch_prompt:
             parts.append(f"REPLANNING: {rebranch_prompt}")
         if self.node_id:
-            # Use TRM's enhanced advice method (already updated above)
             advice = self._trm.get_upper_chain_advice(self.node_id)
             if advice:
                 parts.append(advice)
             
-            # NEW: Check for credential chains
             cred_chain = self._trm.get_credential_chain(self.node_id)
             if cred_chain:
                 parts.append("\n=== AVAILABLE CREDENTIALS ===")
                 for cred in cred_chain:
-                    parts.append(
-                        f"From {cred['direction']} ({cred['node_id']}): {cred['abstract']}"
-                    )
+                    parts.append(f"From {cred['direction']} ({cred['node_id']}): {cred['abstract']}")
         
         return "\n\n".join(parts)
     
     def _flush_graph(self) -> None:
-        """Update graph"""
+        """Update graph visualization"""
         if self.node_id:
             status_map = {
                 TaskStatus.PENDING: 'pending',
@@ -589,7 +587,7 @@ Summary?"""
             )
     
     def _get_planner_system_prompt(self) -> str:
-        """Planner prompt"""
+        """System prompt for task planner"""
         return """Penetration testing task planner.
 
 Analyze and decide decomposition.
@@ -604,7 +602,7 @@ Guidelines:
 Return valid JSON."""
     
     def _get_executor_system_prompt(self, advice: str) -> str:
-        """Enhanced executor system prompt"""
+        """System prompt for task executor"""
         return f"""You are an expert penetration tester executing a specific task in a Kali Linux container.
 
 ENVIRONMENT:
@@ -654,7 +652,7 @@ BEGIN EXECUTION:
 Execute commands step-by-step to complete the task. Respond with your first command now."""
     
     def _call_llm(self, system_prompt: str, user_prompt: str, temperature: float = 0, timeout: int = 60) -> str:
-        """Call LLM with timeout and retries"""
+        """Call LLM with retry logic and rate limiting"""
         max_retries = 5
         base_delay = 2
         
@@ -688,6 +686,7 @@ Execute commands step-by-step to complete the task. Respond with your first comm
                     if e.response.status_code == 429:
                         if attempt < max_retries - 1:
                             delay = base_delay * (2 ** attempt)
+                            print(f"[LLM] Rate limited (429). Waiting {delay}s... (attempt {attempt + 1}/{max_retries})")
                             time.sleep(delay)
                             continue
                         else:
@@ -705,7 +704,7 @@ Execute commands step-by-step to complete the task. Respond with your first comm
             raise RuntimeError("Exhausted retries")
     
     def _extract_json(self, response: str) -> str:
-        """Extract JSON"""
+        """Extract JSON from LLM response"""
         response = response.strip()
         
         if response.startswith('{'):

@@ -35,14 +35,35 @@ services:
       - FLASK_DEBUG=1
       - AUTO_CONTINUE_DELAY=${AUTO_CONTINUE_DELAY:-10}
       
-      # Parallel Execution Configuration (NEW)
+      # Staggered Parallel Execution Configuration
       - PARALLEL_ENABLED=${PARALLEL_ENABLED:-true}
-      - PARALLEL_MAX_WORKERS=${PARALLEL_MAX_WORKERS:-10}
+      
+      # Soft limit on worker pool (high for staggered execution)
+      - PARALLEL_MAX_WORKERS=${PARALLEL_MAX_WORKERS:-100}
+      
+      # CRITICAL: Maximum concurrent LLM API calls (prevents 429 errors)
+      # This is the PRIMARY control for parallelism
+      # Adjust based on your API tier:
+      #   Free tier: 2-3
+      #   Pro tier: 5-10
+      #   Enterprise: 10-20
       - PARALLEL_MAX_LLM=${PARALLEL_MAX_LLM:-5}
+      
+      # LLM retry configuration
       - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-5}
       - LLM_BASE_DELAY=${LLM_BASE_DELAY:-2}
+      
+      # Docker execution timeout
       - DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-90}
+      
+      # File naming strategy
       - USE_NODE_PREFIXES=${USE_NODE_PREFIXES:-true}
+      
+      # Staggered execution settings (NEW)
+      # Start N nodes every M seconds
+      - STAGGER_BATCH_SIZE=${STAGGER_BATCH_SIZE:-2}
+      - STAGGER_DELAY=${STAGGER_DELAY:-180}
+      
     ports:
       - "5000:5000"
     restart: unless-stopped
@@ -56,10 +77,10 @@ services:
       resources:
         limits:
           cpus: '4.0'
-          memory: 4G
+          memory: 8G
         reservations:
-          cpus: '2.0'
-          memory: 2G
+          cpus: '4.0'
+          memory: 4G
 
 networks:
   kali-net:

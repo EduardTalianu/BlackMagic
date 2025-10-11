@@ -290,6 +290,138 @@ def execute_request():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/execute_stream", methods=["POST"])
+def execute_stream():
+    """
+    Execute user request with Server-Sent Events streaming.
+    Returns real-time updates as commands execute.
+    """
+    try:
+        data = request.json
+        user_request = data.get("message", "").strip()
+        mode = data.get("mode", "assistant")
+        
+        if not user_request:
+            return jsonify({"error": "Message cannot be empty"}), 400
+        
+        print(f"[EXECUTE_STREAM] Mode: {mode}, Request: {user_request[:100]}")
+        
+        if mode == "assistant":
+            # Assistant mode with streaming
+            from src.chat_handler import ChatHandler
+            from src.mcp_agent import MCPAgent
+            import json
+            import queue
+            import threading
+            
+            def generate():
+                """Generator function for SSE"""
+                
+                # Create event queue for thread-safe communication
+                event_queue = queue.Queue()
+                
+                def execute_task():
+                    """Execute task in separate thread"""
+                    try:
+                        # Create MCP client and chat handler
+                        mcp_client = MCPAgent(
+                            container_name=KALI_NAME,
+                            llm_url=LLM_URL,
+                            llm_key=LLM_KEY,
+                            model=LLM_MODEL
+                        )
+                        
+                        chat_handler = ChatHandler(
+                            llm_url=LLM_URL,
+                            llm_key=LLM_KEY,
+                            model=LLM_MODEL,
+                            mcp_client=mcp_client
+                        )
+                        
+                        # Define callback for streaming updates
+                        def stream_callback(event_type, content):
+                            """Send events to queue"""
+                            event_queue.put({
+                                "type": event_type,
+                                "content": content
+                            })
+                        
+                        # Execute with streaming
+                        success, output = chat_handler.execute_simple(user_request, stream_callback)
+                        
+                        # Send final event
+                        event_queue.put({
+                            "type": "done",
+                            "success": success,
+                            "output": output
+                        })
+                        
+                    except Exception as e:
+                        event_queue.put({
+                            "type": "error",
+                            "content": str(e)
+                        })
+                        event_queue.put({
+                            "type": "done",
+                            "success": False,
+                            "output": str(e)
+                        })
+                
+                # Start execution in background thread
+                thread = threading.Thread(target=execute_task)
+                thread.daemon = True
+                thread.start()
+                
+                # Yield events as they arrive
+                while True:
+                    try:
+                        event = event_queue.get(timeout=60)  # 60 second timeout
+                        
+                        # Format as SSE
+                        event_data = json.dumps(event)
+                        yield f"data: {event_data}\n\n"
+                        
+                        # Stop if done
+                        if event.get("type") == "done":
+                            break
+                            
+                    except queue.Empty:
+                        # Timeout - send keepalive
+                        yield f": keepalive\n\n"
+                        continue
+            
+            return app.response_class(
+                generate(),
+                mimetype='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'X-Accel-Buffering': 'no'
+                }
+            )
+        
+        elif mode == "automation":
+            # Automation mode: return task config (no streaming needed)
+            if not task_translator:
+                return jsonify({"error": "Task translator not initialized"}), 500
+            
+            translated_task = task_translator.translate_task(user_request)
+            task_dict = translated_task.model_dump()
+            log_translation(user_request, task_dict)
+            
+            return jsonify({
+                "mode": "automation",
+                "message": user_request,
+                "translated_task": task_dict
+            })
+        
+        else:
+            return jsonify({"error": f"Invalid mode: {mode}"}), 400
+        
+    except Exception as e:
+        print(f"[EXECUTE_STREAM] Error: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/translate", methods=["POST"])
 def translate_task():
     """Translate user request into structured task (legacy endpoint)"""

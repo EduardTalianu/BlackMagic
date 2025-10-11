@@ -41,22 +41,75 @@ function msg(text, color = '#2196f3', isHTML = false) {
     
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message system-message';
-    msgDiv.style.borderLeftColor = color;
+    
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
     
     if (isHTML) {
-        msgDiv.innerHTML = text;
+        contentDiv.innerHTML = text;
     } else {
-        msgDiv.textContent = text;
+        contentDiv.textContent = text;
     }
+    
+    msgDiv.appendChild(contentDiv);
     
     chatMessages.appendChild(msgDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
+function formatTimestamp(date) {
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const day = date.getDate();
+    const month = date.toLocaleString('en', { month: 'short' });
+    return `${hours}:${minutes}, ${day} ${month}`;
+}
+
+function formatTerminalOutput(commands) {
+    let html = '<div class="terminal-output">';
+    
+    const parts = commands.split('$').filter(p => p.trim());
+    
+    parts.forEach(part => {
+        const lines = part.trim().split('\n');
+        const command = lines[0].trim();
+        const output = lines.slice(1).join('\n').trim();
+        
+        html += '<div class="command-line">$ ' + esc(command) + '</div>';
+        
+        if (output) {
+            // Check for special message types
+            if (output.includes('[System]') || output.includes('Automatically installed')) {
+                html += '<div class="command-output install-message">' + esc(output) + '</div>';
+            } else if (output.includes('✅') || output.includes('DONE:')) {
+                html += '<div class="command-output success-message">' + esc(output) + '</div>';
+            } else if (output.includes('❌') || output.includes('Error')) {
+                html += '<div class="command-output error-message">' + esc(output) + '</div>';
+            } else {
+                html += '<div class="command-output">' + esc(output) + '</div>';
+            }
+        }
+    });
+    
+    html += '</div>';
+    return html;
+}
+
 function addUserMessage(text) {
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message user-message';
-    msgDiv.textContent = text;
+    
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    contentDiv.textContent = text;
+    
+    const timestamp = document.createElement('span');
+    timestamp.className = 'timestamp';
+    timestamp.textContent = formatTimestamp(new Date());
+    
+    msgDiv.appendChild(contentDiv);
+    msgDiv.appendChild(timestamp);
+    
     chatMessages.appendChild(msgDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
@@ -65,11 +118,21 @@ function addAssistantMessage(text, isHTML = false) {
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message assistant-message';
     
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    
     if (isHTML) {
-        msgDiv.innerHTML = text;
+        contentDiv.innerHTML = text;
     } else {
-        msgDiv.textContent = text;
+        contentDiv.textContent = text;
     }
+    
+    const timestamp = document.createElement('span');
+    timestamp.className = 'timestamp';
+    timestamp.textContent = formatTimestamp(new Date());
+    
+    msgDiv.appendChild(contentDiv);
+    msgDiv.appendChild(timestamp);
     
     chatMessages.appendChild(msgDiv);
     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -278,35 +341,174 @@ async function handleSend() {
     // Disable send button
     sendBtn.disabled = true;
     
+    // For automation mode, use the regular endpoint
+    if (currentMode === 'automation') {
+        try {
+            const r = await fetch('/execute', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    message: txt,
+                    mode: currentMode 
+                })
+            });
+            
+            const d = await r.json();
+            
+            if (d.error) {
+                msg('❌ ' + d.error, '#f44336');
+                sendBtn.disabled = false;
+                return;
+            }
+            
+            handleAutomationResponse(d);
+            
+        } catch (e) {
+            console.error('Execute error:', e);
+            msg('❌ ' + e.message, '#f44336');
+        } finally {
+            sendBtn.disabled = false;
+        }
+        return;
+    }
+    
+    // For assistant mode, use streaming endpoint
     try {
-        console.log(`Calling /execute with mode: ${currentMode}, message: ${txt}`);
+        console.log(`Using SSE streaming for: ${txt}`);
         
-        const r = await fetch('/execute', {
+        const response = await fetch('/execute_stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 message: txt,
-                mode: currentMode 
+                mode: 'assistant'
             })
         });
         
-        const d = await r.json();
-        console.log('Execute response:', d);
-        
-        if (d.error) {
-            msg('❌ ' + d.error, '#f44336');
-            sendBtn.disabled = false;
-            return;
+        if (!response.ok) {
+            throw new Error('Streaming request failed');
         }
         
-        if (d.mode === 'assistant') {
-            handleAssistantResponse(d);
-        } else if (d.mode === 'automation') {
-            handleAutomationResponse(d);
+        // Create message container
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'message assistant-message';
+        
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content';
+        
+        // Create terminal container for command output
+        const terminalDiv = document.createElement('div');
+        terminalDiv.className = 'terminal-output';
+        terminalDiv.style.display = 'none'; // Hidden until first command
+        
+        contentDiv.appendChild(terminalDiv);
+        msgDiv.appendChild(contentDiv);
+        chatMessages.appendChild(msgDiv);
+        
+        let hasCommands = false;
+        
+        // Process SSE stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        
+        while (true) {
+            const { done, value } = await reader.read();
+            
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            
+            const events = buffer.split('\n\n');
+            buffer = events.pop();
+            
+            for (const event of events) {
+                if (!event.trim() || !event.startsWith('data: ')) continue;
+                
+                try {
+                    const jsonStr = event.substring(6);
+                    const data = JSON.parse(jsonStr);
+                    
+                    if (data.type === 'conversation') {
+                        // Conversational response - no terminal
+                        contentDiv.removeChild(terminalDiv);
+                        contentDiv.textContent = data.content;
+                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        
+                    } else if (data.type === 'command') {
+                        // Show terminal and add command
+                        terminalDiv.style.display = 'block';
+                        hasCommands = true;
+                        
+                        const cmdDiv = document.createElement('div');
+                        cmdDiv.className = 'command-line';
+                        cmdDiv.textContent = '$ ' + data.content;
+                        terminalDiv.appendChild(cmdDiv);
+                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        
+                    } else if (data.type === 'output') {
+                        // Add command output
+                        const outputDiv = document.createElement('div');
+                        outputDiv.className = 'command-output';
+                        
+                        // Detect special messages
+                        if (data.content.includes('[System]') || data.content.includes('Automatically installed')) {
+                            outputDiv.className = 'command-output install-message';
+                        } else if (data.content.includes('Error') || data.content.includes('❌')) {
+                            outputDiv.className = 'command-output error-message';
+                        }
+                        
+                        outputDiv.textContent = data.content;
+                        terminalDiv.appendChild(outputDiv);
+                        
+                        // Add spacing
+                        const spacer = document.createElement('div');
+                        spacer.style.height = '8px';
+                        terminalDiv.appendChild(spacer);
+                        
+                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        
+                    } else if (data.type === 'complete') {
+                        // Add success message
+                        const completeDiv = document.createElement('div');
+                        completeDiv.className = 'command-output success-message';
+                        completeDiv.textContent = data.content;
+                        terminalDiv.appendChild(completeDiv);
+                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        
+                    } else if (data.type === 'error' || data.type === 'warning') {
+                        // Add error/warning
+                        const errorDiv = document.createElement('div');
+                        errorDiv.className = data.type === 'error' ? 'command-output error-message' : 'command-output';
+                        errorDiv.textContent = data.content;
+                        
+                        if (hasCommands) {
+                            terminalDiv.appendChild(errorDiv);
+                        } else {
+                            contentDiv.removeChild(terminalDiv);
+                            contentDiv.textContent = data.content;
+                        }
+                        
+                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        
+                    } else if (data.type === 'done') {
+                        // Add timestamp
+                        const timestamp = document.createElement('span');
+                        timestamp.className = 'timestamp';
+                        timestamp.textContent = formatTimestamp(new Date());
+                        msgDiv.appendChild(timestamp);
+                        
+                        console.log('Streaming complete:', data.success);
+                    }
+                    
+                } catch (e) {
+                    console.error('Error parsing SSE event:', e);
+                }
+            }
         }
         
     } catch (e) {
-        console.error('Execute error:', e);
+        console.error('Streaming error:', e);
         msg('❌ ' + e.message, '#f44336');
     } finally {
         sendBtn.disabled = false;
@@ -314,21 +516,19 @@ async function handleSend() {
 }
 
 function handleAssistantResponse(data) {
-    // Show output in terminal-style box
     const output = data.output || '';
     
-    let html = '<div style="font-family:monospace;white-space:pre-wrap;padding:15px;background:#000;color:#0f0;border-radius:6px;max-height:500px;overflow-y:auto;margin-top:10px;">';
-    html += esc(output);
-    html += '</div>';
+    // Check if this is a conversational response (no commands executed)
+    const isConversational = !output.includes('$') && !output.includes('Command output:');
     
-    addAssistantMessage(html, true);
-    
-    // Don't show completion message
-    // if (data.success) {
-    //     msg('✅ Request completed', '#4caf50');
-    // } else {
-    //     msg('⚠ Request completed with issues', '#ff9800');
-    // }
+    if (isConversational) {
+        // Display as natural conversation
+        addAssistantMessage(output);
+    } else {
+        // Display as formatted terminal output
+        const formattedHTML = formatTerminalOutput(output);
+        addAssistantMessage(formattedHTML, true);
+    }
 }
 
 function handleAutomationResponse(data) {

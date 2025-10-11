@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-chat_handler.py - Direct chat execution for simple requests
+chat_handler.py - Direct chat execution with conversational intelligence
 """
 import json
 import requests
-from typing import Tuple, Optional
+from typing import Tuple
 from .mcp_agent import MCPAgent
 
 
+# Kept for backwards compatibility (no longer used)
 class ChatComplexity:
-    """Represents task complexity assessment"""
+    """Deprecated - kept for import compatibility"""
     def __init__(self, is_simple: bool, reasoning: str, suggested_approach: str = ""):
         self.is_simple = is_simple
         self.reasoning = reasoning
@@ -18,8 +19,8 @@ class ChatComplexity:
 
 class ChatHandler:
     """
-    Handles direct chat-style execution for simple requests.
-    Routes complex requests to structured task system.
+    Handles direct chat-style execution.
+    Distinguishes between conversation and commands.
     """
     
     def __init__(self, llm_url: str, llm_key: str, model: str, mcp_client: MCPAgent):
@@ -27,127 +28,214 @@ class ChatHandler:
         self.llm_key = llm_key
         self.model = model
         self.mcp_client = mcp_client
+        self.stream_callback = None  # For real-time updates
     
-    def assess_complexity(self, user_request: str) -> ChatComplexity:
+    def execute_simple(self, user_request: str, stream_callback=None) -> Tuple[bool, str]:
         """
-        Determine if request is simple (chat mode) or complex (structured task mode).
+        Execute request with intelligent routing.
+        Conversations get direct responses, tasks get command execution.
         
-        Simple = Can be done in 1-3 commands, no branching needed
-        Complex = Requires decomposition, multiple stages, branching logic
+        Args:
+            user_request: The user's message
+            stream_callback: Optional callback for real-time updates (for SSE)
         """
-        system_prompt = """You are a task complexity assessor for a penetration testing system.
+        self.stream_callback = stream_callback
+        
+        # First, classify the request
+        request_type = self._classify_request(user_request)
+        
+        if request_type == "conversation":
+            # Handle as pure conversation - no commands
+            return self._handle_conversation(user_request)
+        else:
+            # Handle as command execution
+            return self._handle_execution(user_request)
+    
+    def _classify_request(self, user_request: str) -> str:
+        """
+        Classify if request needs command execution or is just conversation.
+        Returns: "conversation" or "execution"
+        """
+        system_prompt = """You classify user requests for a penetration testing system.
 
-Analyze user requests and determine if they can be handled as SIMPLE (direct execution) or COMPLEX (structured task tree).
+Return ONLY one word: "conversation" or "execution"
 
-SIMPLE requests (chat mode):
-- Single tool execution (e.g., "scan this port", "get HTTP headers")
-- Quick checks (e.g., "is port 80 open?", "what's the SSL cert?")
-- File operations (e.g., "show me the report", "list scans")
-- 1-3 sequential commands, no branching needed
-- Can be completed in under 2 minutes
+CONVERSATION: Greetings, questions about the system, general chat, help requests
+Examples: "hello", "what can you do?", "how does this work?", "thanks"
 
-COMPLEX requests (structured task mode):
-- Multi-stage operations requiring planning (e.g., "full pentest")
-- Multiple parallel branches (e.g., "enumerate all services AND scan for vulns")
-- Operations requiring verification and retry logic
-- Anything with "full", "comprehensive", "complete assessment"
-- Would benefit from tree visualization and progress tracking
+EXECUTION: Actual pentesting tasks requiring bash commands
+Examples: "scan port 80", "enumerate subdomains", "check SSL cert"
+"""
+        
+        try:
+            response = self._call_llm(system_prompt, f'Classify: "{user_request}"', temperature=0)
+            classification = response.strip().lower()
+            
+            # Validate response
+            if "conversation" in classification:
+                return "conversation"
+            elif "execution" in classification:
+                return "execution"
+            else:
+                # Default to conversation for ambiguous cases
+                return "conversation"
+                
+        except Exception as e:
+            print(f"[ChatHandler] Classification failed: {e}, defaulting to conversation")
+            return "conversation"
+    
+    def _handle_conversation(self, user_request: str) -> Tuple[bool, str]:
+        """Handle conversational requests without command execution"""
+        system_prompt = """You are a friendly penetration testing assistant.
 
-Return JSON:
-{
-    "is_simple": true/false,
-    "reasoning": "why this classification",
-    "suggested_approach": "how to execute (only if complex)"
-}"""
+Respond naturally to the user's message. Be concise and helpful.
 
-        user_prompt = f"""Analyze this request:
+If they ask what you can do, mention:
+- Run security scans (nmap, nikto, etc.)
+- Enumerate subdomains and services  
+- Check vulnerabilities
+- Execute pentesting tools in Kali Linux
 
-"{user_request}"
-
-Is this SIMPLE (chat mode) or COMPLEX (structured task)?"""
+Keep responses short and conversational."""
 
         try:
-            response = self._call_llm(system_prompt, user_prompt, temperature=0)
-            data = json.loads(self._extract_json(response))
+            response = self._call_llm(system_prompt, user_request, temperature=0.7)
             
-            return ChatComplexity(
-                is_simple=data.get('is_simple', False),
-                reasoning=data.get('reasoning', ''),
-                suggested_approach=data.get('suggested_approach', '')
-            )
+            # If streaming, send the response as an event
+            if self.stream_callback:
+                self.stream_callback("conversation", response)
+            
+            return True, response
+            
         except Exception as e:
-            # Default to simple on error (fail-safe to chat mode)
-            return ChatComplexity(
-                is_simple=True,
-                reasoning=f"Classification failed, defaulting to chat mode: {e}",
-                suggested_approach=""
-            )
+            error_msg = f"Error: {e}"
+            if self.stream_callback:
+                self.stream_callback("error", error_msg)
+            return False, error_msg
     
-    def execute_simple(self, user_request: str) -> Tuple[bool, str]:
-        """
-        Execute simple request directly without task tree.
-        
-        Returns:
-            (success, output) tuple
-        """
+    def _handle_execution(self, user_request: str) -> Tuple[bool, str]:
+        """Handle command execution requests with real-time streaming"""
         system_prompt = """You are a penetration testing assistant with direct access to a Kali Linux container.
 
-Execute the user's request using bash commands. You can use any tool in Kali Linux.
+Execute the user's request using bash commands.
 
-EXECUTION RULES:
-1. Keep it simple - use 1-3 commands maximum
-2. Execute commands sequentially
-3. Save results to /app/work/ if needed
-4. Respond with "DONE: summary" when complete
-5. If impossible, respond "IMPOSSIBLE: reason"
+CRITICAL RULES:
+1. Return ONLY executable bash commands - no explanations, no comments
+2. When you see command output, analyze it and either:
+   - Return next command to execute
+   - Return "DONE: brief summary" when task is complete
+3. If task cannot be done, return "IMPOSSIBLE: reason"
+4. Do NOT return "DONE:" as a bash command
+5. Do NOT explain what you're doing, just execute
 
-RESPONSE FORMAT:
-Each response should be ONE executable bash command, like:
-  curl -I https://example.com
-  nmap -p 80 example.com
-  cat /app/work/results.txt
+EXAMPLES:
+User: "check if port 80 is open on example.com"
+You: nmap -p 80 example.com
+[sees output]
+You: DONE: Port 80 is open on example.com
 
-After seeing output, decide next command or mark DONE.
-
-CURRENT REQUEST: Execute this quickly and directly."""
+User: "get HTTP headers"  
+You: curl -I https://example.com
+[sees output]
+You: DONE: Retrieved HTTP headers successfully
+"""
 
         conversation = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"User request: {user_request}\n\nExecute this now."}
+            {"role": "user", "content": user_request}
         ]
         
-        max_iterations = 5  # Much lower than MCP's 20
         output_parts = []
+        max_iterations = 5
         
         try:
             for iteration in range(max_iterations):
                 # Get next command from LLM
-                cmd = self._call_llm_conversation(conversation)
-                conversation.append({"role": "assistant", "content": cmd})
+                response = self._call_llm_conversation(conversation)
+                conversation.append({"role": "assistant", "content": response})
                 
-                output_parts.append(f"\n💬 AI: {cmd}\n")
+                # Parse response
+                cmd = response.strip()
                 
                 # Check if done or impossible
                 if cmd.startswith("DONE:"):
                     summary = cmd[5:].strip()
-                    return True, "\n".join(output_parts) + f"\n✅ Complete: {summary}"
+                    final_msg = f"✅ {summary}"
+                    if self.stream_callback:
+                        self.stream_callback("complete", final_msg)
+                    return True, "\n".join(output_parts) + f"\n\n{final_msg}"
                 
                 if cmd.startswith("IMPOSSIBLE:"):
                     reason = cmd[11:].strip()
-                    return False, "\n".join(output_parts) + f"\n❌ Cannot complete: {reason}"
+                    final_msg = f"❌ Cannot complete: {reason}"
+                    if self.stream_callback:
+                        self.stream_callback("error", final_msg)
+                    return False, "\n".join(output_parts) + f"\n\n{final_msg}"
+                
+                # Clean command (remove explanatory text)
+                cmd = self._clean_command(cmd)
+                
+                # Stream: about to execute command
+                if self.stream_callback:
+                    self.stream_callback("command", cmd)
                 
                 # Execute command
                 result = self.mcp_client.execute_single_command(cmd)
-                output_parts.append(f"$ {cmd}\n{result}\n")
+                
+                # Stream: command output
+                if self.stream_callback:
+                    self.stream_callback("output", result)
+                
+                # Format output for return value
+                terminal_output = f"$ {cmd}\n{result}"
+                output_parts.append(terminal_output)
                 
                 # Add to conversation
-                conversation.append({"role": "user", "content": f"Output:\n{result}"})
+                conversation.append({"role": "user", "content": f"Command output:\n{result}"})
             
             # Hit iteration limit
-            return False, "\n".join(output_parts) + "\n⚠️ Reached iteration limit. Consider using structured task mode."
+            final_msg = "⚠️ Reached iteration limit"
+            if self.stream_callback:
+                self.stream_callback("warning", final_msg)
+            return False, "\n".join(output_parts) + f"\n\n{final_msg}"
             
         except Exception as e:
-            return False, "\n".join(output_parts) + f"\n❌ Error: {e}"
+            error_msg = f"❌ Error: {e}"
+            if self.stream_callback:
+                self.stream_callback("error", error_msg)
+            return False, "\n".join(output_parts) + f"\n\n{error_msg}"
+    
+    def _clean_command(self, cmd: str) -> str:
+        """
+        Clean command text to remove explanations and comments.
+        Extract actual executable command.
+        """
+        # Remove markdown code blocks
+        if "```" in cmd:
+            lines = cmd.split("\n")
+            in_code = False
+            code_lines = []
+            for line in lines:
+                if line.strip().startswith("```"):
+                    in_code = not in_code
+                    continue
+                if in_code:
+                    code_lines.append(line)
+            if code_lines:
+                cmd = "\n".join(code_lines)
+        
+        # Remove comment-only lines
+        lines = cmd.split("\n")
+        non_comment_lines = [
+            line for line in lines 
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        
+        if non_comment_lines:
+            # Return first non-comment line (single command)
+            return non_comment_lines[0].strip()
+        
+        return cmd.strip()
     
     def _call_llm(self, system_prompt: str, user_prompt: str, temperature: float = 0) -> str:
         """Single LLM call"""
@@ -185,25 +273,3 @@ CURRENT REQUEST: Execute this quickly and directly."""
         response = requests.post(self.llm_url, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
-    
-    def _extract_json(self, response: str) -> str:
-        """Extract JSON from response"""
-        response = response.strip()
-        
-        if response.startswith('{'):
-            brace_count = 0
-            for i, char in enumerate(response):
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        return response[:i+1]
-        
-        if '```json' in response:
-            start = response.find('```json') + 7
-            end = response.find('```', start)
-            if end != -1:
-                return response[start:end].strip()
-        
-        return response

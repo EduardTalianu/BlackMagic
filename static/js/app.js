@@ -1,11 +1,12 @@
 /* =================================================================
-   Kali-LLM Task Manager - Main Application Logic
+   Kali-LLM Task Manager - With Assistant/Automation Mode Toggle
    ================================================================= */
 
 // Initialize Mermaid
 mermaid.initialize({ startOnLoad: false, theme: 'dark' });
 
 // Global state
+let currentMode = 'assistant'; // 'assistant' or 'automation'
 let task = null;
 let orig = null;
 let curPath = '/app/work';
@@ -15,10 +16,12 @@ let auto = { graph: false, output: false };
 let nodeCache = {};
 let improveTaskId = null;
 let improveNodeId = null;
-let graphScrollPos = { tasks: 0, graph: 0 }; // Track scroll positions
+let graphScrollPos = { tasks: 0, graph: 0 };
 
 // DOM element references
-let input, status, startBtn, resetBtn, taskCard, abstract, description, verification;
+let input, sendBtn, resetBtn, taskCard, abstract, description, verification;
+let executeTaskBtn, cancelTaskBtn, chatMessages;
+let assistantMode, automationMode, toggleSlider;
 let graphId, outputTaskId, outputNodeSelect;
 let graphView, outputView, fileGrid, fileView, path, upBtn, taskList, taskGraph, taskGraphView, count;
 let refreshTasksBtn, loadGraphBtn, loadOutputBtn, graphAuto, outputAuto;
@@ -30,10 +33,41 @@ let improveNodeModal, improveNodeComments, improveNodeCancelBtn, improveNodeSubm
 // Utility Functions
 // =================================================================
 
-function msg(t, c = '#2196f3') {
-    if (!status) return;
-    status.innerHTML = t;
-    status.style.borderLeftColor = c;
+function msg(text, color = '#2196f3', isHTML = false) {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message system-message';
+    msgDiv.style.borderLeftColor = color;
+    
+    if (isHTML) {
+        msgDiv.innerHTML = text;
+    } else {
+        msgDiv.textContent = text;
+    }
+    
+    chatMessages.appendChild(msgDiv);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function addUserMessage(text) {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message user-message';
+    msgDiv.textContent = text;
+    chatMessages.appendChild(msgDiv);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function addAssistantMessage(text, isHTML = false) {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message assistant-message';
+    
+    if (isHTML) {
+        msgDiv.innerHTML = text;
+    } else {
+        msgDiv.textContent = text;
+    }
+    
+    chatMessages.appendChild(msgDiv);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
 function esc(t) {
@@ -51,13 +85,18 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Initialize all element references
     input = document.getElementById('input');
-    status = document.getElementById('status');
-    startBtn = document.getElementById('startBtn');
+    sendBtn = document.getElementById('sendBtn');
     resetBtn = document.getElementById('resetBtn');
     taskCard = document.getElementById('taskCard');
     abstract = document.getElementById('abstract');
     description = document.getElementById('description');
     verification = document.getElementById('verification');
+    executeTaskBtn = document.getElementById('executeTaskBtn');
+    cancelTaskBtn = document.getElementById('cancelTaskBtn');
+    chatMessages = document.getElementById('chatMessages');
+    assistantMode = document.getElementById('assistantMode');
+    automationMode = document.getElementById('automationMode');
+    toggleSlider = document.getElementById('toggleSlider');
     graphId = document.getElementById('graphId');
     outputTaskId = document.getElementById('outputTaskId');
     outputNodeSelect = document.getElementById('outputNodeSelect');
@@ -95,12 +134,20 @@ document.addEventListener('DOMContentLoaded', () => {
     input.addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            handleStart();
+            handleSend();
         }
     });
     
-    startBtn.addEventListener('click', handleStart);
+    sendBtn.addEventListener('click', handleSend);
     resetBtn.addEventListener('click', handleReset);
+    executeTaskBtn.addEventListener('click', executeStructuredTask);
+    cancelTaskBtn.addEventListener('click', cancelTaskConfig);
+    
+    // Mode toggle
+    assistantMode.addEventListener('click', () => setMode('assistant'));
+    automationMode.addEventListener('click', () => setMode('automation'));
+    
+    // Other event listeners
     refreshTasksBtn.addEventListener('click', loadTasks);
     loadGraphBtn.addEventListener('click', loadGraph);
     loadOutputBtn.addEventListener('click', loadOutput);
@@ -112,24 +159,21 @@ document.addEventListener('DOMContentLoaded', () => {
     navShared.addEventListener('click', () => loadFiles('/shared'));
     tasksViewSelect.addEventListener('change', switchTasksView);
     
-    // Task improvement modal
+    // Modal listeners
     improveTaskCancelBtn.addEventListener('click', () => {
         improveTaskModal.classList.remove('active');
         improveTaskId = null;
     });
     improveTaskSubmitBtn.addEventListener('click', submitTaskImprovement);
     
-    // Node improvement modal
     improveNodeCancelBtn.addEventListener('click', () => {
         improveNodeModal.classList.remove('active');
         improveNodeId = null;
     });
     improveNodeSubmitBtn.addEventListener('click', submitNodeImprovement);
     
-    // Task ID change listeners for dropdowns
+    // Task ID change listeners
     outputTaskId.addEventListener('change', loadOutputNodes);
-    
-    // Node selection change listeners
     outputNodeSelect.addEventListener('change', loadOutput);
     
     // Tab switching
@@ -140,23 +184,61 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
     
+    // Initialize mode toggle
+    setMode('assistant');
+    
     console.log('Event listeners attached');
-    msg('Ready to start');
+    
+    // Load initial tasks list
     loadTasks();
 });
+
+// =================================================================
+// Mode Toggle
+// =================================================================
+
+function setMode(mode) {
+    currentMode = mode;
+    
+    if (mode === 'assistant') {
+        assistantMode.classList.add('active');
+        automationMode.classList.remove('active');
+        toggleSlider.style.left = '0%';
+    } else {
+        assistantMode.classList.remove('active');
+        automationMode.classList.add('active');
+        toggleSlider.style.left = '50%';
+    }
+}
 
 // =================================================================
 // Tab Management
 // =================================================================
 
 function switchTab(name) {
+    console.log(`Switching to tab: ${name}`);
+    
+    // Remove active class from all tabs and content
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    document.querySelector(`.tab[data-tab="${name}"]`).classList.add('active');
-    document.getElementById(name).classList.add('active');
     
-    if (name === 'files') loadFiles(curPath);
-    else if (name === 'tasks') loadTasks();
+    // Add active class to selected tab and content
+    const selectedTab = document.querySelector(`.tab[data-tab="${name}"]`);
+    const selectedContent = document.getElementById(name);
+    
+    if (selectedTab) selectedTab.classList.add('active');
+    if (selectedContent) selectedContent.classList.add('active');
+    
+    // Load data for specific tabs
+    if (name === 'files') {
+        loadFiles(curPath);
+    } else if (name === 'tasks') {
+        loadTasks();
+    } else if (name === 'graph' && graphId.value) {
+        loadGraph();
+    } else if (name === 'output' && outputTaskId.value) {
+        loadOutput();
+    }
 }
 
 function switchTasksView() {
@@ -172,56 +254,98 @@ function switchTasksView() {
 }
 
 // =================================================================
-// Task Management
+// Message Handling
 // =================================================================
 
-async function handleStart() {
-    console.log('handleStart called, task=', task);
-    
-    if (!task) {
-        const txt = input.value.trim();
-        if (!txt) {
-            msg('⚠ Enter a task description', '#ff9800');
-            return;
-        }
-        
-        msg('🔄 Translating task...');
-        startBtn.disabled = true;
-        
-        try {
-            console.log('Calling /translate with:', txt);
-            const r = await fetch('/translate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ request: txt })
-            });
-            const d = await r.json();
-            console.log('Translation response:', d);
-            
-            if (d.error) {
-                startBtn.disabled = false;
-                msg('❌ ' + d.error, '#f44336');
-                return;
-            }
-            
-            task = d.translated_task;
-            orig = { ...task };
-            abstract.value = task.abstract;
-            description.value = task.description;
-            verification.value = task.verification;
-            taskCard.style.display = 'block';
-            startBtn.disabled = false;
-            startBtn.innerHTML = '▶️ Execute Task';
-            msg('✅ Task translated! Edit fields if needed, then click Execute', '#4caf50');
-            
-        } catch (e) {
-            console.error('Translation error:', e);
-            startBtn.disabled = false;
-            msg('❌ ' + e.message, '#f44336');
-        }
+async function handleSend() {
+    const txt = input.value.trim();
+    if (!txt) {
+        msg('⚠ Enter a request', '#ff9800');
         return;
     }
     
+    // Add user message
+    addUserMessage(txt);
+    
+    // Clear input
+    input.value = '';
+    
+    // Disable send button
+    sendBtn.disabled = true;
+    
+    try {
+        console.log(`Calling /execute with mode: ${currentMode}, message: ${txt}`);
+        
+        const r = await fetch('/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                message: txt,
+                mode: currentMode 
+            })
+        });
+        
+        const d = await r.json();
+        console.log('Execute response:', d);
+        
+        if (d.error) {
+            msg('❌ ' + d.error, '#f44336');
+            sendBtn.disabled = false;
+            return;
+        }
+        
+        if (d.mode === 'assistant') {
+            handleAssistantResponse(d);
+        } else if (d.mode === 'automation') {
+            handleAutomationResponse(d);
+        }
+        
+    } catch (e) {
+        console.error('Execute error:', e);
+        msg('❌ ' + e.message, '#f44336');
+    } finally {
+        sendBtn.disabled = false;
+    }
+}
+
+function handleAssistantResponse(data) {
+    // Show output in terminal-style box
+    const output = data.output || '';
+    
+    let html = '<div style="font-family:monospace;white-space:pre-wrap;padding:15px;background:#000;color:#0f0;border-radius:6px;max-height:500px;overflow-y:auto;margin-top:10px;">';
+    html += esc(output);
+    html += '</div>';
+    
+    addAssistantMessage(html, true);
+    
+    if (data.success) {
+        msg('✅ Request completed', '#4caf50');
+    } else {
+        msg('⚠ Request completed with issues', '#ff9800');
+    }
+}
+
+function handleAutomationResponse(data) {
+    // Show task configuration
+    task = data.translated_task;
+    orig = { ...task };
+    abstract.value = task.abstract;
+    description.value = task.description;
+    verification.value = task.verification;
+    
+    taskCard.style.display = 'block';
+    taskCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    
+    msg('📋 Task configured. Review and execute below.', '#2196f3');
+}
+
+function cancelTaskConfig() {
+    taskCard.style.display = 'none';
+    task = null;
+    msg('❌ Task configuration cancelled', '#999');
+}
+
+async function executeStructuredTask() {
     task = {
         abstract: abstract.value.trim(),
         description: description.value.trim(),
@@ -233,22 +357,20 @@ async function handleStart() {
         return;
     }
     
-    msg('⏳ Creating task...');
-    startBtn.disabled = true;
+    executeTaskBtn.disabled = true;
+    msg('⏳ Creating structured task...', '#2196f3');
     
     try {
-        console.log('Creating task with:', task);
         const r = await fetch('/task', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ translated_task: task })
         });
         const d = await r.json();
-        console.log('Task creation response:', d);
         
         if (d.error) {
-            startBtn.disabled = false;
             msg('❌ ' + d.error, '#f44336');
+            executeTaskBtn.disabled = false;
             return;
         }
         
@@ -257,15 +379,19 @@ async function handleStart() {
         
         await loadOutputNodes();
         
-        msg('✅ Task ' + curTask + ' running', '#4caf50');
+        msg('✅ Task ' + curTask + ' started', '#4caf50');
+        taskCard.style.display = 'none';
+        
+        // Switch to output tab
         switchTab('output');
         startAuto();
         loadTasks();
         
     } catch (e) {
         console.error('Task creation error:', e);
-        startBtn.disabled = false;
         msg('❌ ' + e.message, '#f44336');
+    } finally {
+        executeTaskBtn.disabled = false;
     }
 }
 
@@ -280,9 +406,16 @@ function handleReset() {
     verification.value = '';
     taskCard.style.display = 'none';
     outputNodeSelect.innerHTML = '<option value="">Select task first...</option>';
-    startBtn.disabled = false;
-    startBtn.innerHTML = '▶️ Start';
-    msg('🔄 Reset');
+    sendBtn.disabled = false;
+    
+    // Clear chat messages except welcome
+    const welcome = chatMessages.querySelector('.welcome-message');
+    chatMessages.innerHTML = '';
+    if (welcome) {
+        chatMessages.appendChild(welcome);
+    }
+    
+    msg('🔄 Reset complete', '#999');
     fetch('/reset', { method: 'POST' });
 }
 
@@ -353,7 +486,6 @@ async function loadTasks() {
             });
         });
         
-        // Update graph view if active
         if (tasksViewSelect.value === 'graph') {
             loadTasksGraph();
         }
@@ -377,10 +509,8 @@ async function loadTasksGraph() {
             return;
         }
         
-        // Save scroll position
         graphScrollPos.tasks = taskGraph.scrollTop;
         
-        // Build combined graph from all tasks
         let combinedGraph = 'graph TD\n';
         let styles = new Set();
         
@@ -401,7 +531,6 @@ async function loadTasksGraph() {
             }
         }
         
-        // Add styles
         combinedGraph += '\n    %% Enhanced styling for dark mode\n';
         combinedGraph += '    classDef completed fill:#2e7d32,stroke:#4caf50,stroke-width:3px,color:#ffffff\n';
         combinedGraph += '    classDef working fill:#f57c00,stroke:#ff9800,stroke-width:3px,color:#ffffff\n';
@@ -415,7 +544,6 @@ async function loadTasksGraph() {
             combinedGraph += '    ' + style + '\n';
         });
         
-        // Apply theme
         let themedGraph = `%%{init: {'theme':'dark', 'themeVariables': {
             'primaryColor': '#2d2d2d',
             'primaryTextColor': '#e0e0e0',
@@ -435,7 +563,6 @@ async function loadTasksGraph() {
         taskGraphView.innerHTML = '<div class="mermaid">' + themedGraph + '</div>';
         mermaid.init(undefined, taskGraphView.querySelector('.mermaid'));
         
-        // Restore scroll position
         setTimeout(() => {
             taskGraph.scrollTop = graphScrollPos.tasks;
         }, 100);
@@ -523,7 +650,7 @@ function populateNodeDropdown(selectEl, nodes) {
 }
 
 // =================================================================
-// Task Actions
+// Task Actions (used by task list)
 // =================================================================
 
 async function viewTask(id, e) {
@@ -594,7 +721,7 @@ async function completeNode(id, e) {
         const d = await r.json();
         msg(d.error ? '❌ ' + d.error : '✅ Completed ' + id, d.error ? '#f44336' : '#4caf50');
         loadTasks();
-        loadGraph(); // Refresh graph
+        loadGraph();
     } catch (e) {
         msg('❌ ' + e.message, '#f44336');
     }
@@ -714,7 +841,6 @@ async function loadGraph() {
     const id = graphId.value.trim();
     if (!id) return msg('⚠ Enter task ID', '#ff9800');
     
-    // Save scroll position before update
     graphScrollPos.graph = graphView.scrollTop;
     
     try {
@@ -744,7 +870,6 @@ async function loadGraph() {
         graphView.innerHTML = '<div class="mermaid">' + graph + '</div>';
         mermaid.init(undefined, graphView.querySelector('.mermaid'));
         
-        // Restore scroll position after render
         setTimeout(() => {
             graphView.scrollTop = graphScrollPos.graph;
         }, 100);

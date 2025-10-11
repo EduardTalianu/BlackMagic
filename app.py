@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-app.py - Task management API with 4-direction graph support, automatic status reconciliation,
-and configurable execution limits
+app.py - Task management API with Automation/Assistant mode toggle
 """
 import os
 import docker
@@ -94,9 +93,6 @@ except Exception as e:
 def reconcile_node_status():
     """
     Background task: Reconcile status across all nodes every 5 minutes.
-    
-    Scans all node logs for completion markers (DONE:) and updates status
-    if mismatched between logs and TaskManager state.
     """
     while True:
         try:
@@ -111,24 +107,19 @@ def reconcile_node_status():
                 for node_id, node_data in list(task_manager.nodes.items()):
                     current_status = node_data['status']
                     
-                    # Skip already completed/failed/cancelled
                     if current_status in ['completed', 'failed', 'cancelled', 'impossible']:
                         continue
                     
-                    # Check log for completion marker
                     log_content = task_manager.get_node_log(node_id)
                     
                     if log_content and 'DONE:' in log_content:
-                        # Log shows completion but status is stuck
                         task_id = node_data['task_id']
                         
                         print(f"[RECONCILE] Node {node_id} stuck at '{current_status}' but log shows DONE")
                         
-                        # Update self.nodes
                         task_manager.nodes[node_id]['status'] = 'completed'
                         task_manager.nodes[node_id]['completed_at'] = datetime.datetime.now()
                         
-                        # Sync to TRM
                         with task_manager.trms_lock:
                             if task_id in task_manager.trms:
                                 trm = task_manager.trms[task_id]
@@ -225,6 +216,107 @@ def index():
     return render_template('index.html')
 
 
+# ========== CHAT AND AUTOMATION ENDPOINTS ==========
+
+@app.route("/execute", methods=["POST"])
+def execute_request():
+    """
+    Execute user request based on mode (assistant or automation).
+    
+    Mode parameter determines execution strategy:
+    - assistant: Direct chat execution (1-5 commands)
+    - automation: Structured task tree with branching
+    """
+    try:
+        data = request.json
+        user_request = data.get("message", "").strip()
+        mode = data.get("mode", "assistant")  # 'assistant' or 'automation'
+        
+        if not user_request:
+            return jsonify({"error": "Message cannot be empty"}), 400
+        
+        print(f"[EXECUTE] Mode: {mode}, Request: {user_request[:100]}")
+        
+        if mode == "assistant":
+            # Assistant mode: Direct chat execution
+            from src.chat_handler import ChatHandler
+            from src.mcp_agent import MCPAgent
+            
+            mcp_client = MCPAgent(
+                container_name=KALI_NAME,
+                llm_url=LLM_URL,
+                llm_key=LLM_KEY,
+                model=LLM_MODEL
+            )
+            
+            chat_handler = ChatHandler(
+                llm_url=LLM_URL,
+                llm_key=LLM_KEY,
+                model=LLM_MODEL,
+                mcp_client=mcp_client
+            )
+            
+            success, output = chat_handler.execute_simple(user_request)
+            
+            return jsonify({
+                "mode": "assistant",
+                "success": success,
+                "output": output,
+                "message": user_request
+            })
+        
+        elif mode == "automation":
+            # Automation mode: Create structured task
+            if not task_translator:
+                return jsonify({"error": "Task translator not initialized"}), 500
+            
+            # Translate request to structured task
+            translated_task = task_translator.translate_task(user_request)
+            task_dict = translated_task.model_dump()
+            log_translation(user_request, task_dict)
+            
+            return jsonify({
+                "mode": "automation",
+                "message": user_request,
+                "translated_task": task_dict
+            })
+        
+        else:
+            return jsonify({"error": f"Invalid mode: {mode}"}), 400
+        
+    except Exception as e:
+        print(f"[EXECUTE] Error: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/translate", methods=["POST"])
+def translate_task():
+    """Translate user request into structured task (legacy endpoint)"""
+    try:
+        data = request.json
+        user_request = data.get("request", "").strip()
+        
+        if not user_request:
+            return jsonify({"error": "Request cannot be empty"}), 400
+        
+        if not task_translator:
+            return jsonify({"error": "Task translator not initialized"}), 500
+        
+        translated_task = task_translator.translate_task(user_request)
+        task_dict = translated_task.model_dump()
+        log_translation(user_request, task_dict)
+        
+        return jsonify({
+            "translated_task": task_dict,
+            "original_request": user_request
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ========== CONFIGURATION ENDPOINTS ==========
 
 @app.route("/config", methods=["GET"])
 def get_parallel_config():
@@ -287,20 +379,7 @@ def get_execution_limits():
 
 @app.route("/limits", methods=["PUT"])
 def update_execution_limits():
-    """
-    Update execution limits configuration.
-    
-    Example body:
-    {
-        "mcp": {
-            "max_iterations": 30,
-            "command_timeout": 600
-        },
-        "docker": {
-            "exec_timeout": 600
-        }
-    }
-    """
+    """Update execution limits configuration"""
     try:
         data = request.json
         limits = ExecutionLimits.from_dict(data)
@@ -316,15 +395,7 @@ def update_execution_limits():
 
 @app.route("/metrics", methods=["GET"])
 def get_execution_metrics():
-    """
-    Get execution metrics (kill-switch hit counts).
-    
-    Tracks how often each soft kill-switch was triggered:
-    - MCP iteration limits
-    - LLM rate limits
-    - Task retry exhaustion
-    - Docker command timeouts
-    """
+    """Get execution metrics"""
     try:
         metrics = get_metrics()
         return jsonify(metrics.to_dict())
@@ -345,34 +416,23 @@ def reset_execution_metrics():
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """
-    Comprehensive health check.
-    
-    Returns:
-    - Execution limits configuration
-    - Current metrics
-    - Task queue status
-    - Container connection status
-    """
+    """Comprehensive health check"""
     try:
         from src.task_models import TaskStatus
         
         limits = get_limits()
         metrics = get_metrics()
         
-        # Test container connection
         container_ok = False
         container_msg = "Task manager not initialized"
         
         if task_manager:
             try:
-                # Use the task_manager's mcp_client for health check
                 container_ok, container_msg = task_manager.mcp_client.test_connection()
             except Exception as e:
                 container_ok = False
                 container_msg = str(e)
         
-        # Count active tasks
         active_tasks = 0
         total_tasks = 0
         
@@ -383,7 +443,6 @@ def health_check():
                 if info['status'] in [TaskStatus.PENDING, TaskStatus.PLANNING, TaskStatus.WORKING]
             )
         
-        # Get executor status
         executor_status = {}
         if task_manager:
             try:
@@ -412,35 +471,11 @@ def health_check():
         }), 500
 
 
-@app.route("/translate", methods=["POST"])
-def translate():
-    """Translate user request into structured task"""
-    try:
-        data = request.json
-        user_request = data.get("request", "").strip()
-        
-        if not user_request:
-            return jsonify({"error": "Request cannot be empty"}), 400
-        
-        if not task_translator:
-            return jsonify({"error": "Task translator not initialized"}), 500
-        
-        translated_task = task_translator.translate_task(user_request)
-        task_dict = translated_task.model_dump()
-        log_translation(user_request, task_dict)
-        
-        return jsonify({
-            "translated_task": task_dict,
-            "original_request": user_request
-        })
-        
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+# ========== TASK MANAGEMENT ENDPOINTS ==========
 
 @app.route("/task", methods=["POST"])
 def create_task():
-    """Create a new hierarchical task - returns immediately with task_id"""
+    """Create a new hierarchical task"""
     try:
         data = request.json
         translated_task = data.get("translated_task")
@@ -531,7 +566,6 @@ def cancel_task(task_id):
         
         success = task_manager.cancel_task(task_id)
         if success:
-            # Track cancellation metric
             metrics = get_metrics()
             metrics.increment('cancellations')
             
@@ -585,16 +619,17 @@ def restart_task(task_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ========== NODE MANAGEMENT ENDPOINTS ==========
+
 @app.route("/node/<node_id>/cancel", methods=["PUT"])
 def cancel_node(node_id):
-    """Cancel a specific node (keeps in tree but stops execution)"""
+    """Cancel a specific node"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
         
         success = task_manager.cancel_node(node_id)
         if success:
-            # Track cancellation metric
             metrics = get_metrics()
             metrics.increment('cancellations')
             
@@ -667,7 +702,7 @@ def restart_node(node_id):
 
 @app.route("/node/<node_id>/remove", methods=["DELETE"])
 def remove_node(node_id):
-    """Remove a node and its entire subtree from the task tree"""
+    """Remove a node and its entire subtree"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
@@ -725,14 +760,7 @@ def get_node_log(node_id):
 
 @app.route("/node/<node_id>/rescope", methods=["POST"])
 def rescope_node(node_id):
-    """
-    Re-scope: move node to different parent (UP navigation).
-    
-    Body: {
-        "new_parent_id": "n123456",
-        "reason": "Failed exploit, trying lateral movement"
-    }
-    """
+    """Re-scope: move node to different parent"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
@@ -744,19 +772,16 @@ def rescope_node(node_id):
         if not new_parent_id:
             return jsonify({"error": "new_parent_id required"}), 400
         
-        # Get node's task_id
         with task_manager.nodes_lock:
             if node_id not in task_manager.nodes:
                 return jsonify({"error": "Node not found"}), 404
             task_id = task_manager.nodes[node_id]['task_id']
         
-        # Get TRM
         with task_manager.trms_lock:
             if task_id not in task_manager.trms:
                 return jsonify({"error": "Task not found"}), 404
             trm = task_manager.trms[task_id]
         
-        # Perform re-scope using 4-direction graph
         trm.move_node_to_new_parent(node_id, new_parent_id, reason)
         
         return jsonify({
@@ -773,15 +798,7 @@ def rescope_node(node_id):
 
 @app.route("/node/<node_id>/add-variant", methods=["POST"])
 def add_variant_node(node_id):
-    """
-    Add variant as right sibling (RIGHT navigation).
-    
-    Body: {
-        "abstract": "sqlmap with tamper scripts",
-        "description": "Run sqlmap --tamper=space2comment",
-        "verification": "SQLi successful with tamper"
-    }
-    """
+    """Add variant as right sibling"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
@@ -794,25 +811,20 @@ def add_variant_node(node_id):
         if not all([abstract, description, verification]):
             return jsonify({"error": "abstract, description, verification required"}), 400
         
-        # Get node's task_id
         with task_manager.nodes_lock:
             if node_id not in task_manager.nodes:
                 return jsonify({"error": "Node not found"}), 404
             task_id = task_manager.nodes[node_id]['task_id']
         
-        # Get TRM
         with task_manager.trms_lock:
             if task_id not in task_manager.trms:
                 return jsonify({"error": "Task not found"}), 404
             trm = task_manager.trms[task_id]
         
-        # Generate variant node ID
         variant_node_id = trm.generate_node_id()
         
-        # Add variant using 4-direction graph
         trm.add_sibling_variant(node_id, variant_node_id, abstract, description)
         
-        # Register with task manager
         task_manager.register_node(
             task_id=task_id,
             node_id=variant_node_id,
@@ -836,26 +848,21 @@ def add_variant_node(node_id):
 
 @app.route("/node/<node_id>/credentials", methods=["GET"])
 def get_node_credentials(node_id):
-    """
-    Get credential chain: all previous nodes that may have credentials.
-    """
+    """Get credential chain"""
     try:
         if not task_manager:
             return jsonify({"error": "Task manager not initialized"}), 500
         
-        # Get node's task_id
         with task_manager.nodes_lock:
             if node_id not in task_manager.nodes:
                 return jsonify({"error": "Node not found"}), 404
             task_id = task_manager.nodes[node_id]['task_id']
         
-        # Get TRM
         with task_manager.trms_lock:
             if task_id not in task_manager.trms:
                 return jsonify({"error": "Task not found"}), 404
             trm = task_manager.trms[task_id]
         
-        # Get credential chain using 4-direction traversal
         cred_chain = trm.get_credential_chain(node_id)
         
         return jsonify({
@@ -868,8 +875,7 @@ def get_node_credentials(node_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ========== END 4-DIRECTION GRAPH ENDPOINTS ==========
-
+# ========== GRAPH VISUALIZATION ENDPOINTS ==========
 
 @app.route("/tree", methods=["GET"])
 def get_task_tree():
@@ -894,9 +900,11 @@ def get_task_tree():
 
 @app.route("/reset", methods=["POST"])
 def reset():
-    """Reset session (kept for compatibility)"""
+    """Reset session"""
     return jsonify({"status": "Session reset"})
 
+
+# ========== FILE BROWSER ENDPOINTS ==========
 
 @app.route("/files", methods=["GET"])
 def get_files():

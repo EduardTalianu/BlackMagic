@@ -18,6 +18,7 @@ from .graph_directions import DirectionalGraph, Direction, reverse_direction  # 
 from .mcp_agent import MCPAgent
 from .task_node import TaskNode, TaskNeedTurningException, TaskImpossibleException
 from .task_manager import TaskManager
+from .chat_handler import ChatHandler, ChatComplexity
 
 __all__ = [
     'TaskModel',

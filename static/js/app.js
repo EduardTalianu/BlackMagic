@@ -34,6 +34,11 @@ let improveNodeModal, improveNodeComments, improveNodeCancelBtn, improveNodeSubm
 // =================================================================
 
 function msg(text, color = '#2196f3', isHTML = false) {
+    // Hide completion messages
+    if (text.includes('✅ Request completed') || text.includes('✅ Task')) {
+        return;
+    }
+    
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message system-message';
     msgDiv.style.borderLeftColor = color;
@@ -156,7 +161,7 @@ document.addEventListener('DOMContentLoaded', () => {
     upBtn.addEventListener('click', goUp);
     navWork.addEventListener('click', () => loadFiles('/app/work'));
     navLogs.addEventListener('click', () => loadFiles('/app/logs'));
-    navShared.addEventListener('click', () => loadFiles('/shared'));
+    navShared.addEventListener('click', () => loadFiles('/app/shared'));
     tasksViewSelect.addEventListener('change', switchTasksView);
     
     // Modal listeners
@@ -318,11 +323,12 @@ function handleAssistantResponse(data) {
     
     addAssistantMessage(html, true);
     
-    if (data.success) {
-        msg('✅ Request completed', '#4caf50');
-    } else {
-        msg('⚠ Request completed with issues', '#ff9800');
-    }
+    // Don't show completion message
+    // if (data.success) {
+    //     msg('✅ Request completed', '#4caf50');
+    // } else {
+    //     msg('⚠ Request completed with issues', '#ff9800');
+    // }
 }
 
 function handleAutomationResponse(data) {
@@ -379,7 +385,8 @@ async function executeStructuredTask() {
         
         await loadOutputNodes();
         
-        msg('✅ Task ' + curTask + ' started', '#4caf50');
+        // Don't show completion message
+        // msg('✅ Task ' + curTask + ' started', '#4caf50');
         taskCard.style.display = 'none';
         
         // Switch to output tab
@@ -787,7 +794,8 @@ async function submitTaskImprovement() {
         if (d.error) {
             msg('❌ ' + d.error, '#f44336');
         } else {
-            msg('✅ Restarted as ' + d.new_task_id + (comments ? ' with improvements' : ''), '#4caf50');
+            // Don't show completion message
+            // msg('✅ Restarted as ' + d.new_task_id + (comments ? ' with improvements' : ''), '#4caf50');
             curTask = d.new_task_id;
             graphId.value = outputTaskId.value = d.new_task_id;
             await loadOutputNodes();
@@ -820,7 +828,8 @@ async function submitNodeImprovement() {
         if (d.error) {
             msg('❌ ' + d.error, '#f44336');
         } else {
-            msg('✅ Node restarted as ' + d.new_node_id + (comments ? ' with improvements' : ''), '#4caf50');
+            // Don't show completion message
+            // msg('✅ Node restarted as ' + d.new_node_id + (comments ? ' with improvements' : ''), '#4caf50');
         }
         
         improveNodeModal.classList.remove('active');
@@ -959,7 +968,8 @@ function startAuto() {
                 loadOutput();
                 loadGraph();
                 loadTasks();
-                msg('✅ Task ' + d.status, d.status === 'completed' ? '#4caf50' : '#f44336');
+                // Don't show completion message
+                // msg('✅ Task ' + d.status, d.status === 'completed' ? '#4caf50' : '#f44336');
             }
         } catch (e) {}
     }, 3000);

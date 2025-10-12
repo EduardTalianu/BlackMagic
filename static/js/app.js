@@ -389,23 +389,33 @@ async function handleSend() {
             throw new Error('Streaming request failed');
         }
         
-        // Create message container
-        const msgDiv = document.createElement('div');
-        msgDiv.className = 'message assistant-message';
+        // Track current command-output pair
+        let currentMessage = null;
+        let currentTerminal = null;
         
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'message-content';
-        
-        // Create terminal container for command output
-        const terminalDiv = document.createElement('div');
-        terminalDiv.className = 'terminal-output';
-        terminalDiv.style.display = 'none'; // Hidden until first command
-        
-        contentDiv.appendChild(terminalDiv);
-        msgDiv.appendChild(contentDiv);
-        chatMessages.appendChild(msgDiv);
-        
-        let hasCommands = false;
+        function createNewCommandMessage() {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message assistant-message';
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            const terminalDiv = document.createElement('div');
+            terminalDiv.className = 'terminal-output';
+            
+            contentDiv.appendChild(terminalDiv);
+            msgDiv.appendChild(contentDiv);
+            
+            const timestamp = document.createElement('span');
+            timestamp.className = 'timestamp';
+            timestamp.textContent = formatTimestamp(new Date());
+            msgDiv.appendChild(timestamp);
+            
+            chatMessages.appendChild(msgDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            
+            return { msgDiv, terminalDiv };
+        }
         
         // Process SSE stream
         const reader = response.body.getReader();
@@ -430,75 +440,60 @@ async function handleSend() {
                     const data = JSON.parse(jsonStr);
                     
                     if (data.type === 'conversation') {
-                        // Conversational response - no terminal
-                        contentDiv.removeChild(terminalDiv);
-                        contentDiv.textContent = data.content;
-                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        // Conversational response - simple message
+                        addAssistantMessage(data.content);
                         
                     } else if (data.type === 'command') {
-                        // Show terminal and add command
-                        terminalDiv.style.display = 'block';
-                        hasCommands = true;
+                        // New command - create new message bubble
+                        const newMsg = createNewCommandMessage();
+                        currentMessage = newMsg.msgDiv;
+                        currentTerminal = newMsg.terminalDiv;
                         
                         const cmdDiv = document.createElement('div');
                         cmdDiv.className = 'command-line';
                         cmdDiv.textContent = '$ ' + data.content;
-                        terminalDiv.appendChild(cmdDiv);
-                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        currentTerminal.appendChild(cmdDiv);
                         
                     } else if (data.type === 'output') {
-                        // Add command output
-                        const outputDiv = document.createElement('div');
-                        outputDiv.className = 'command-output';
-                        
-                        // Detect special messages
-                        if (data.content.includes('[System]') || data.content.includes('Automatically installed')) {
-                            outputDiv.className = 'command-output install-message';
-                        } else if (data.content.includes('Error') || data.content.includes('❌')) {
-                            outputDiv.className = 'command-output error-message';
+                        // Add output to current terminal
+                        if (currentTerminal) {
+                            const outputDiv = document.createElement('div');
+                            outputDiv.className = 'command-output';
+                            
+                            // Detect special messages
+                            if (data.content.includes('[System]') || data.content.includes('Automatically installed')) {
+                                outputDiv.className = 'command-output install-message';
+                            } else if (data.content.includes('Error') || data.content.includes('❌')) {
+                                outputDiv.className = 'command-output error-message';
+                            }
+                            
+                            outputDiv.textContent = data.content;
+                            currentTerminal.appendChild(outputDiv);
+                            chatMessages.scrollTop = chatMessages.scrollHeight;
                         }
-                        
-                        outputDiv.textContent = data.content;
-                        terminalDiv.appendChild(outputDiv);
-                        
-                        // Add spacing
-                        const spacer = document.createElement('div');
-                        spacer.style.height = '8px';
-                        terminalDiv.appendChild(spacer);
-                        
-                        chatMessages.scrollTop = chatMessages.scrollHeight;
                         
                     } else if (data.type === 'complete') {
-                        // Add success message
-                        const completeDiv = document.createElement('div');
-                        completeDiv.className = 'command-output success-message';
-                        completeDiv.textContent = data.content;
-                        terminalDiv.appendChild(completeDiv);
-                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                        // Summary message - separate message
+                        addAssistantMessage(data.content);
+                        currentMessage = null;
+                        currentTerminal = null;
                         
                     } else if (data.type === 'error' || data.type === 'warning') {
-                        // Add error/warning
-                        const errorDiv = document.createElement('div');
-                        errorDiv.className = data.type === 'error' ? 'command-output error-message' : 'command-output';
-                        errorDiv.textContent = data.content;
-                        
-                        if (hasCommands) {
-                            terminalDiv.appendChild(errorDiv);
+                        // Error/warning message
+                        if (currentTerminal) {
+                            const errorDiv = document.createElement('div');
+                            errorDiv.className = data.type === 'error' ? 'command-output error-message' : 'command-output';
+                            errorDiv.textContent = data.content;
+                            currentTerminal.appendChild(errorDiv);
                         } else {
-                            contentDiv.removeChild(terminalDiv);
-                            contentDiv.textContent = data.content;
+                            addAssistantMessage(data.content);
                         }
-                        
                         chatMessages.scrollTop = chatMessages.scrollHeight;
                         
                     } else if (data.type === 'done') {
-                        // Add timestamp
-                        const timestamp = document.createElement('span');
-                        timestamp.className = 'timestamp';
-                        timestamp.textContent = formatTimestamp(new Date());
-                        msgDiv.appendChild(timestamp);
-                        
                         console.log('Streaming complete:', data.success);
+                        currentMessage = null;
+                        currentTerminal = null;
                     }
                     
                 } catch (e) {
@@ -512,6 +507,22 @@ async function handleSend() {
         msg('❌ ' + e.message, '#f44336');
     } finally {
         sendBtn.disabled = false;
+    }
+}  // <-- This closing brace was missing!
+
+function handleAssistantResponse(data) {
+    const output = data.output || '';
+    
+    // Check if this is a conversational response (no commands executed)
+    const isConversational = !output.includes('$') && !output.includes('Command output:');
+    
+    if (isConversational) {
+        // Display as natural conversation
+        addAssistantMessage(output);
+    } else {
+        // Display as formatted terminal output
+        const formattedHTML = formatTerminalOutput(output);
+        addAssistantMessage(formattedHTML, true);
     }
 }
 

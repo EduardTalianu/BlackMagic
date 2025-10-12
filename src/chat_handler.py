@@ -146,7 +146,7 @@ You: DONE: Retrieved HTTP headers successfully
         ]
         
         output_parts = []
-        max_iterations = 5
+        max_iterations = 20
         
         try:
             for iteration in range(max_iterations):

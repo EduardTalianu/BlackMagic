@@ -17,7 +17,7 @@
                 <div class="tab" data-tab="files">📁 Files</div>
             </div>
             
-            <!-- Chat Tab -->
+            <!-- Chat Tab - NO wrapper div, directly under main-view -->
             <div id="chat" class="tab-content active">
                 <div class="chat-container">
                     <div class="chat-messages" id="chatMessages">
@@ -61,30 +61,22 @@
                         </div>
                     </div>
                     
-                    <!-- Input Area at Bottom -->
+                    <!-- Input Area at Bottom - YOUR NEW DESIGN -->
                     <div class="chat-input-area">
                         <div class="mode-toggle">
                             <div class="toggle-container">
-                                <div class="toggle-option" id="assistantMode">
-                                    <span class="toggle-icon">🎯</span>
+                                <div class="toggle-option active" id="assistantMode">
                                     <span class="toggle-label">Assistant</span>
                                 </div>
-                                <div class="toggle-slider" id="toggleSlider"></div>
                                 <div class="toggle-option" id="automationMode">
-                                    <span class="toggle-icon">🚀</span>
                                     <span class="toggle-label">Automation</span>
                                 </div>
                             </div>
                         </div>
                         <div class="input-row">
-                            <textarea id="input" rows="3" placeholder="Enter your request here...
-Examples:
-  • Get HTTP headers for example.com
-  • Scan ports on 192.168.1.1
-  • Enumerate subdomains for target.com"></textarea>
+                            <textarea id="input" rows="1" placeholder="Continue the conversation..."></textarea>
                             <button class="btn-send" id="sendBtn">
-                                <span>▶️</span>
-                                <span>Send</span>
+                                <span>▶</span>
                             </button>
                         </div>
                         <div class="input-actions">

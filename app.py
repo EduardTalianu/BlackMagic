@@ -11,6 +11,7 @@ import datetime
 import json
 import threading
 import time
+import queue
 
 # Import task management system
 try:
@@ -88,6 +89,40 @@ except Exception as e:
     print(f"✗ Warning: Task manager initialization failed: {e}")
     traceback.print_exc()
     task_manager = None
+
+# Global chat handler management for persistent conversations
+chat_handler_lock = threading.Lock()
+chat_handlers = {}  # session_id -> ChatHandler
+
+
+def get_chat_handler():
+    """Get or create persistent chat handler for current session"""
+    # For single-user app, use a single global handler
+    # For multi-user, use Flask session ID or similar
+    session_id = "default"
+    
+    with chat_handler_lock:
+        if session_id not in chat_handlers:
+            from src.chat_handler import ChatHandler
+            from src.mcp_agent import MCPAgent
+            
+            print(f"[ChatHandler] Creating new chat handler for session: {session_id}")
+            
+            mcp_client = MCPAgent(
+                container_name=KALI_NAME,
+                llm_url=LLM_URL,
+                llm_key=LLM_KEY,
+                model=LLM_MODEL
+            )
+            
+            chat_handlers[session_id] = ChatHandler(
+                llm_url=LLM_URL,
+                llm_key=LLM_KEY,
+                model=LLM_MODEL,
+                mcp_client=mcp_client
+            )
+        
+        return chat_handlers[session_id]
 
 
 def reconcile_node_status():
@@ -238,23 +273,8 @@ def execute_request():
         print(f"[EXECUTE] Mode: {mode}, Request: {user_request[:100]}")
         
         if mode == "assistant":
-            # Assistant mode: Direct chat execution
-            from src.chat_handler import ChatHandler
-            from src.mcp_agent import MCPAgent
-            
-            mcp_client = MCPAgent(
-                container_name=KALI_NAME,
-                llm_url=LLM_URL,
-                llm_key=LLM_KEY,
-                model=LLM_MODEL
-            )
-            
-            chat_handler = ChatHandler(
-                llm_url=LLM_URL,
-                llm_key=LLM_KEY,
-                model=LLM_MODEL,
-                mcp_client=mcp_client
-            )
+            # Assistant mode: Use persistent chat handler
+            chat_handler = get_chat_handler()
             
             success, output = chat_handler.execute_simple(user_request)
             
@@ -295,6 +315,7 @@ def execute_stream():
     """
     Execute user request with Server-Sent Events streaming.
     Returns real-time updates as commands execute.
+    Uses persistent chat handler for conversation context.
     """
     try:
         data = request.json
@@ -307,12 +328,7 @@ def execute_stream():
         print(f"[EXECUTE_STREAM] Mode: {mode}, Request: {user_request[:100]}")
         
         if mode == "assistant":
-            # Assistant mode with streaming
-            from src.chat_handler import ChatHandler
-            from src.mcp_agent import MCPAgent
-            import json
-            import queue
-            import threading
+            # Assistant mode with streaming - use persistent chat handler
             
             def generate():
                 """Generator function for SSE"""
@@ -323,20 +339,8 @@ def execute_stream():
                 def execute_task():
                     """Execute task in separate thread"""
                     try:
-                        # Create MCP client and chat handler
-                        mcp_client = MCPAgent(
-                            container_name=KALI_NAME,
-                            llm_url=LLM_URL,
-                            llm_key=LLM_KEY,
-                            model=LLM_MODEL
-                        )
-                        
-                        chat_handler = ChatHandler(
-                            llm_url=LLM_URL,
-                            llm_key=LLM_KEY,
-                            model=LLM_MODEL,
-                            mcp_client=mcp_client
-                        )
+                        # Get persistent chat handler
+                        chat_handler = get_chat_handler()
                         
                         # Define callback for streaming updates
                         def stream_callback(event_type, content):
@@ -346,7 +350,7 @@ def execute_stream():
                                 "content": content
                             })
                         
-                        # Execute with streaming
+                        # Execute with streaming using persistent handler (maintains history)
                         success, output = chat_handler.execute_simple(user_request, stream_callback)
                         
                         # Send final event
@@ -582,6 +586,18 @@ def health_check():
             except:
                 pass
         
+        # Add chat handler status
+        chat_status = {}
+        with chat_handler_lock:
+            chat_status = {
+                'active_handlers': len(chat_handlers),
+                'handlers': {}
+            }
+            for session_id, handler in chat_handlers.items():
+                chat_status['handlers'][session_id] = {
+                    'conversation_length': len(handler.conversation_history)
+                }
+        
         return jsonify({
             "status": "healthy" if container_ok else "degraded",
             "container": {
@@ -594,7 +610,8 @@ def health_check():
                 "active": active_tasks,
                 "total": total_tasks
             },
-            "executor": executor_status
+            "executor": executor_status,
+            "chat": chat_status
         })
     except Exception as e:
         return jsonify({
@@ -1032,8 +1049,16 @@ def get_task_tree():
 
 @app.route("/reset", methods=["POST"])
 def reset():
-    """Reset session"""
-    return jsonify({"status": "Session reset"})
+    """Reset session and clear conversation history"""
+    session_id = "default"
+    
+    # Clear chat handler conversation history
+    with chat_handler_lock:
+        if session_id in chat_handlers:
+            chat_handlers[session_id].reset_conversation()
+            print(f"[RESET] Cleared conversation history for session: {session_id}")
+    
+    return jsonify({"status": "Session reset, conversation cleared"})
 
 
 # ========== FILE BROWSER ENDPOINTS ==========
